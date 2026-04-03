@@ -233,20 +233,7 @@ impl CodexProvider {
                         .trim_end_matches('\\')
                         .to_string();
 
-                    // Direct match
-                    if session_cwd == target_str {
-                        return Ok(true);
-                    }
-
-                    // Subdirectory match (safety: ensure we don't match root by accident)
-                    if (target_str.starts_with(&session_cwd) && session_cwd.len() > 1)
-                        || (session_cwd.starts_with(&target_str) && target_str.len() > 1)
-                    {
-                        return Ok(true);
-                    }
-
-                    // If we found a CWD but it definitely doesn't match, we can stop
-                    return Ok(false);
+                    return Ok(session_cwd == target_str);
                 }
             }
         }
@@ -327,4 +314,37 @@ struct CodexContent {
     #[allow(dead_code)]
     content_type: String,
     text: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn session_meta_line(cwd: &str) -> String {
+        format!(
+            r#"{{"type":"session_meta","timestamp":"2026-04-01T00:00:00Z","payload":{{"cwd":"{}"}}}}"#,
+            cwd
+        )
+    }
+
+    #[tokio::test]
+    async fn probe_project_path_requires_exact_cwd_match() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("session.jsonl");
+        tokio::fs::write(&file_path, session_meta_line("/home/cody"))
+            .await
+            .unwrap();
+
+        let provider = CodexProvider::new();
+
+        assert!(provider
+            .probe_project_path(&file_path, Path::new("/home/cody"))
+            .await
+            .unwrap());
+        assert!(!provider
+            .probe_project_path(&file_path, Path::new("/home/cody/trade-bot"))
+            .await
+            .unwrap());
+    }
 }

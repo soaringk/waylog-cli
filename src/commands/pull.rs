@@ -10,7 +10,8 @@ pub async fn handle_pull(
     provider_name: Option<String>,
     force: bool,
     verbose: bool,
-    project_path: PathBuf,
+    tracking_root: PathBuf,
+    target_project_path: PathBuf,
     output: &mut Output,
 ) -> Result<()> {
     // 1. Validate provider first (before any other operations)
@@ -26,7 +27,7 @@ pub async fn handle_pull(
         }
     }
 
-    output.pull_start(&project_path)?;
+    output.pull_start(&target_project_path)?;
 
     // Filter providers
     let providers_to_sync = if let Some(name) = provider_name {
@@ -51,10 +52,11 @@ pub async fn handle_pull(
 
         // Create session tracker and synchronizer
         let tracker =
-            Arc::new(session::SessionTracker::new(project_path.clone(), provider.clone()).await?);
+            Arc::new(session::SessionTracker::new(tracking_root.clone(), provider.clone()).await?);
         let synchronizer = synchronizer::Synchronizer::new(
             provider.clone(),
-            project_path.clone(),
+            tracking_root.clone(),
+            target_project_path.clone(),
             tracker.clone(),
         );
 

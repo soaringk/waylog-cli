@@ -13,7 +13,8 @@ use tokio::task::JoinHandle;
 pub async fn handle_run(
     agent: Option<String>,
     args: Vec<String>,
-    project_path: PathBuf,
+    tracking_root: PathBuf,
+    target_project_path: PathBuf,
     output: &mut Output,
 ) -> Result<()> {
     let agent_name = match agent {
@@ -43,32 +44,41 @@ pub async fn handle_run(
     }
 
     // Now run_agent can focus on execution without validation
-    run_agent(args, project_path, provider).await?;
+    run_agent(args, tracking_root, target_project_path, provider).await?;
 
     Ok(())
 }
 
 async fn run_agent(
     args: Vec<String>,
-    project_path: PathBuf,
+    tracking_root: PathBuf,
+    target_project_path: PathBuf,
     provider: Arc<dyn providers::base::Provider>,
 ) -> Result<()> {
     // Provider is already validated in handle_run, so we can focus on execution
-    tracing::info!("Starting {} in {}", provider.name(), project_path.display());
+    tracing::info!(
+        "Starting {} in {}",
+        provider.name(),
+        target_project_path.display()
+    );
 
     // Ensure .waylog/history directory exists
-    let waylog_dir = utils::path::get_waylog_dir(&project_path);
+    let waylog_dir = utils::path::get_waylog_dir(&tracking_root);
     utils::path::ensure_dir_exists(&waylog_dir)?;
 
     tracing::info!("Chat history will be saved to: {}", waylog_dir.display());
 
     // Create session tracker
     let tracker =
-        Arc::new(session::SessionTracker::new(project_path.clone(), provider.clone()).await?);
+        Arc::new(session::SessionTracker::new(tracking_root.clone(), provider.clone()).await?);
 
     // Create file watcher
-    let watcher =
-        watcher::FileWatcher::new(provider.clone(), project_path.clone(), tracker.clone());
+    let watcher = watcher::FileWatcher::new(
+        provider.clone(),
+        tracking_root.clone(),
+        target_project_path.clone(),
+        tracker.clone(),
+    );
 
     // Start file watcher in background
     let watcher_handle: JoinHandle<()> = tokio::spawn(async move {
@@ -153,7 +163,7 @@ async fn run_agent(
                     &mut child,
                     &tracker,
                     &provider,
-                    &project_path,
+                    &target_project_path,
                     &waylog_dir,
                     Some(status),
                 )
@@ -177,7 +187,7 @@ async fn run_agent(
                     &mut child,
                     &tracker,
                     &provider,
-                    &project_path,
+                    &target_project_path,
                     &waylog_dir,
                     Some(status),
                 )
@@ -194,7 +204,7 @@ async fn run_agent(
                     &mut child,
                     &tracker,
                     &provider,
-                    &project_path,
+                    &target_project_path,
                     &waylog_dir,
                     Some(status),
                 )
@@ -227,7 +237,7 @@ async fn run_agent(
                         &mut child,
                         &tracker,
                         &provider,
-                        &project_path,
+                        &target_project_path,
                         &waylog_dir,
                         Some(status),
                     )
@@ -247,7 +257,7 @@ async fn run_agent(
                     &mut child,
                     &tracker,
                     &provider,
-                    &project_path,
+                    &target_project_path,
                     &waylog_dir,
                     Some(status),
                 )

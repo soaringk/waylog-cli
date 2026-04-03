@@ -14,22 +14,27 @@ const SYNC_INTERVAL_SECS: u64 = 30;
 /// Periodic sync watcher (simplified - no file watching)
 pub struct FileWatcher {
     provider: Arc<dyn Provider>,
-    project_dir: PathBuf,
+    target_project_dir: PathBuf,
     synchronizer: Synchronizer,
 }
 
 impl FileWatcher {
     pub fn new(
         provider: Arc<dyn Provider>,
-        project_dir: PathBuf,
+        tracking_root: PathBuf,
+        target_project_dir: PathBuf,
         tracker: Arc<SessionTracker>,
     ) -> Self {
-        let synchronizer =
-            Synchronizer::new(provider.clone(), project_dir.clone(), tracker.clone());
+        let synchronizer = Synchronizer::new(
+            provider.clone(),
+            tracking_root,
+            target_project_dir.clone(),
+            tracker.clone(),
+        );
 
         Self {
             provider,
-            project_dir,
+            target_project_dir,
             synchronizer,
         }
     }
@@ -55,7 +60,11 @@ impl FileWatcher {
     /// Sync only the latest session
     async fn sync_latest(&self) -> Result<()> {
         // Find the latest session file
-        let session_file = match self.provider.find_latest_session(&self.project_dir).await? {
+        let session_file = match self
+            .provider
+            .find_latest_session(&self.target_project_dir)
+            .await?
+        {
             Some(file) => file,
             None => {
                 debug!("No session file found");

@@ -52,6 +52,7 @@ async fn main() {
 
         // 1. Resolve project root directory
         let (project_root, is_new_project) = init::resolve_project_root(&cli.command, &mut output)?;
+        let current_dir = std::env::current_dir()?;
 
         // 2. Setup logging (only creates log file if verbose)
         init::setup_logging(&project_root, cli.verbose, cli.quiet)?;
@@ -67,10 +68,18 @@ async fn main() {
         // 4. Dispatch command
         match cli.command {
             Commands::Run { agent, args } => {
-                handle_run(agent, args, project_root, &mut output).await?;
+                handle_run(agent, args, project_root, current_dir, &mut output).await?;
             }
             Commands::Pull { provider, force } => {
-                handle_pull(provider, force, cli.verbose, project_root, &mut output).await?;
+                handle_pull(
+                    provider,
+                    force,
+                    cli.verbose,
+                    project_root,
+                    current_dir,
+                    &mut output,
+                )
+                .await?;
             }
         }
 

@@ -10,7 +10,8 @@ use tracing::debug;
 /// Shared synchronization logic for both watcher and batch sync
 pub struct Synchronizer {
     provider: Arc<dyn Provider>,
-    project_dir: PathBuf,
+    tracking_root: PathBuf,
+    target_project_dir: PathBuf,
     tracker: Arc<SessionTracker>,
 }
 
@@ -25,12 +26,14 @@ pub enum SyncStatus {
 impl Synchronizer {
     pub fn new(
         provider: Arc<dyn Provider>,
-        project_dir: PathBuf,
+        tracking_root: PathBuf,
+        target_project_dir: PathBuf,
         tracker: Arc<SessionTracker>,
     ) -> Self {
         Self {
             provider,
-            project_dir,
+            tracking_root,
+            target_project_dir,
             tracker,
         }
     }
@@ -38,7 +41,10 @@ impl Synchronizer {
     /// Sync all available sessions from the provider
     /// Returns stats: (Synced, UpToDate, Skipped, Failed)
     pub async fn sync_all(&self, force: bool) -> Result<Vec<(PathBuf, SyncStatus)>> {
-        let sessions = self.provider.get_all_sessions(&self.project_dir).await?;
+        let sessions = self
+            .provider
+            .get_all_sessions(&self.target_project_dir)
+            .await?;
         let mut results = Vec::new();
 
         for session_path in sessions {
@@ -80,7 +86,7 @@ impl Synchronizer {
 
                 let timestamp = session.started_at.format("%Y-%m-%d_%H-%M-%SZ");
                 let filename = format!("{}-{}-{}.md", timestamp, self.provider.name(), slug);
-                let path = path::get_waylog_dir(&self.project_dir).join(filename);
+                let path = path::get_waylog_dir(&self.tracking_root).join(filename);
 
                 (path, 0)
             };
@@ -138,5 +144,127 @@ impl Synchronizer {
         Ok(SyncStatus::Synced {
             new_messages: new_messages.len(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::base::{
+        ChatMessage, ChatSession, MessageMetadata, MessageRole, Provider,
+    };
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use std::path::Path;
+    use tempfile::TempDir;
+    use tokio::sync::Mutex;
+
+    struct MockProvider {
+        session_path: PathBuf,
+        session: ChatSession,
+        queried_projects: Arc<Mutex<Vec<PathBuf>>>,
+    }
+
+    #[async_trait]
+    impl Provider for MockProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn data_dir(&self) -> Result<PathBuf> {
+            Ok(std::env::temp_dir())
+        }
+
+        fn session_dir(&self, _project_path: &Path) -> Result<PathBuf> {
+            Ok(std::env::temp_dir())
+        }
+
+        async fn find_latest_session(&self, _project_path: &Path) -> Result<Option<PathBuf>> {
+            Ok(Some(self.session_path.clone()))
+        }
+
+        async fn parse_session(&self, file_path: &Path) -> Result<ChatSession> {
+            assert_eq!(file_path, self.session_path);
+            Ok(self.session.clone())
+        }
+
+        async fn get_all_sessions(&self, project_path: &Path) -> Result<Vec<PathBuf>> {
+            self.queried_projects
+                .lock()
+                .await
+                .push(project_path.to_path_buf());
+            Ok(vec![self.session_path.clone()])
+        }
+
+        fn is_installed(&self) -> bool {
+            true
+        }
+
+        fn command(&self) -> &str {
+            "mock"
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_all_uses_target_project_for_lookup_and_tracking_root_for_output() {
+        let temp_dir = TempDir::new().unwrap();
+        let tracking_root = temp_dir.path().join("tracking-root");
+        let target_project = temp_dir.path().join("tracking-root").join("nested-project");
+        let session_path = temp_dir.path().join("session.jsonl");
+
+        tokio::fs::create_dir_all(&tracking_root).await.unwrap();
+        tokio::fs::create_dir_all(&target_project).await.unwrap();
+
+        let now = Utc::now();
+        let session = ChatSession {
+            session_id: "session-1".to_string(),
+            provider: "mock".to_string(),
+            project_path: target_project.clone(),
+            started_at: now,
+            updated_at: now,
+            messages: vec![ChatMessage {
+                id: "msg-1".to_string(),
+                timestamp: now,
+                role: MessageRole::User,
+                content: "Nested project session".to_string(),
+                metadata: MessageMetadata::default(),
+            }],
+        };
+
+        let queried_projects = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(MockProvider {
+            session_path: session_path.clone(),
+            session,
+            queried_projects: queried_projects.clone(),
+        });
+
+        let tracker = Arc::new(
+            SessionTracker::new(tracking_root.clone(), provider.clone())
+                .await
+                .unwrap(),
+        );
+        let synchronizer = Synchronizer::new(
+            provider,
+            tracking_root.clone(),
+            target_project.clone(),
+            tracker,
+        );
+
+        let results = synchronizer.sync_all(false).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, session_path);
+        assert!(matches!(
+            results[0].1,
+            SyncStatus::Synced { new_messages: 1 }
+        ));
+
+        let queried = queried_projects.lock().await;
+        assert_eq!(queried.as_slice(), &[target_project]);
+        drop(queried);
+
+        let history_dir = path::get_waylog_dir(&tracking_root);
+        let mut entries = tokio::fs::read_dir(&history_dir).await.unwrap();
+        let markdown = entries.next_entry().await.unwrap().unwrap().path();
+        assert!(markdown.starts_with(&history_dir));
     }
 }
