@@ -45,9 +45,18 @@ impl Synchronizer {
             .provider
             .get_all_sessions(&self.target_project_dir)
             .await?;
+        self.sync_paths(sessions, force).await
+    }
+
+    /// Sync a known list of session files
+    pub async fn sync_paths(
+        &self,
+        session_paths: Vec<PathBuf>,
+        force: bool,
+    ) -> Result<Vec<(PathBuf, SyncStatus)>> {
         let mut results = Vec::new();
 
-        for session_path in sessions {
+        for session_path in session_paths {
             let status = match self.sync_session(&session_path, force).await {
                 Ok(status) => status,
                 Err(e) => SyncStatus::Failed(e.to_string()),

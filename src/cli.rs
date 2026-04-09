@@ -48,5 +48,13 @@ pub enum Commands {
         /// Force re-pull even if up to date
         #[arg(short, long)]
         force: bool,
+
+        /// Traverse subdirectories and aggregate sessions into the resolved tracking root
+        #[arg(short, long)]
+        recursive: bool,
+
+        /// Include hidden directories when using --recursive
+        #[arg(long, visible_alias = "hiden", requires = "recursive")]
+        hidden: bool,
     },
 }

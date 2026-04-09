@@ -70,10 +70,17 @@ async fn main() {
             Commands::Run { agent, args } => {
                 handle_run(agent, args, project_root, current_dir, &mut output).await?;
             }
-            Commands::Pull { provider, force } => {
+            Commands::Pull {
+                provider,
+                force,
+                recursive,
+                hidden,
+            } => {
                 handle_pull(
                     provider,
                     force,
+                    recursive,
+                    hidden,
                     cli.verbose,
                     project_root,
                     current_dir,

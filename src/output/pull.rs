@@ -14,22 +14,36 @@ impl Output {
         Ok(())
     }
     /// Print pull start message
-    pub fn pull_start(&mut self, project_path: &std::path::Path) -> io::Result<()> {
+    pub fn pull_start(
+        &mut self,
+        project_path: &std::path::Path,
+        recursive: bool,
+        hidden: bool,
+    ) -> io::Result<()> {
+        let message = if recursive {
+            if hidden {
+                format!(
+                    "Pulling chat history recursively for project tree (including hidden directories): {}",
+                    project_path.display()
+                )
+            } else {
+                format!(
+                    "Pulling chat history recursively for project tree: {}",
+                    project_path.display()
+                )
+            }
+        } else {
+            format!(
+                "Pulling chat history for project: {}",
+                project_path.display()
+            )
+        };
+
         if !self.quiet() {
             if self.json() {
-                self.print_json_internal(
-                    "pull_start",
-                    &format!(
-                        "Pulling chat history for project: {}",
-                        project_path.display()
-                    ),
-                )?;
+                self.print_json_internal("pull_start", &message)?;
             } else {
-                writeln!(
-                    self.stdout(),
-                    "Pulling chat history for project: {}",
-                    project_path.display()
-                )?;
+                writeln!(self.stdout(), "{}", message)?;
             }
         }
         Ok(())
