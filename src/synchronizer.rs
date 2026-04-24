@@ -85,17 +85,12 @@ impl Synchronizer {
             if let Some(s) = state.get_session(&session.session_id) {
                 (s.markdown_path.clone(), s.synced_message_count)
             } else {
-                // New session: generate filename
-                let slug = session
-                    .messages
-                    .iter()
-                    .find(|m| m.role == crate::providers::base::MessageRole::User)
-                    .map(|m| crate::utils::string::slugify(&m.content))
-                    .unwrap_or_else(|| session.session_id.clone());
-
-                let timestamp = session.started_at.format("%Y-%m-%d_%H-%M-%SZ");
-                let filename = format!("{}-{}-{}.md", timestamp, self.provider.name(), slug);
-                let path = path::get_waylog_dir(&self.tracking_root).join(filename);
+                let path = resolve_session_markdown_path(
+                    &path::get_waylog_dir(&self.tracking_root),
+                    &session,
+                    self.provider.name(),
+                )
+                .await?;
 
                 (path, 0)
             };
@@ -127,11 +122,7 @@ impl Synchronizer {
             path::ensure_dir_exists(parent)?;
         }
 
-        if synced_count == 0 {
-            exporter::create_markdown_file(&markdown_path, &session).await?;
-        } else {
-            exporter::append_messages(&markdown_path, &new_messages).await?;
-        }
+        exporter::create_markdown_file(&markdown_path, &session).await?;
 
         // 6. Update state
         self.tracker
@@ -156,6 +147,54 @@ impl Synchronizer {
     }
 }
 
+pub(crate) async fn resolve_session_markdown_path(
+    history_dir: &Path,
+    session: &crate::providers::base::ChatSession,
+    provider_name: &str,
+) -> Result<PathBuf> {
+    let legacy_path = history_dir.join(session_markdown_filename(session, provider_name));
+
+    if !legacy_path.exists() {
+        return Ok(legacy_path);
+    }
+
+    match exporter::parse_frontmatter(&legacy_path).await {
+        Ok(frontmatter) if frontmatter.session_id.as_deref() == Some(&session.session_id) => {
+            Ok(legacy_path)
+        }
+        _ => Ok(history_dir.join(session_markdown_filename_with_id(session, provider_name))),
+    }
+}
+
+pub(crate) fn session_markdown_filename(
+    session: &crate::providers::base::ChatSession,
+    provider_name: &str,
+) -> String {
+    let slug = session
+        .messages
+        .iter()
+        .find(|m| m.role == crate::providers::base::MessageRole::User)
+        .map(|m| crate::utils::string::slugify(&m.content))
+        .unwrap_or_else(|| crate::utils::string::slugify(&session.session_id));
+    let timestamp = session.started_at.format("%Y-%m-%d_%H-%M-%SZ");
+
+    format!("{}-{}-{}.md", timestamp, provider_name, slug)
+}
+
+fn session_markdown_filename_with_id(
+    session: &crate::providers::base::ChatSession,
+    provider_name: &str,
+) -> String {
+    let legacy_filename = session_markdown_filename(session, provider_name);
+    let session_hash = crate::utils::string::short_hash(&session.session_id);
+
+    if let Some(stem) = legacy_filename.strip_suffix(".md") {
+        format!("{}-{}.md", stem, session_hash)
+    } else {
+        format!("{}-{}.md", legacy_filename, session_hash)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,7 +202,7 @@ mod tests {
         ChatMessage, ChatSession, MessageMetadata, MessageRole, Provider,
     };
     use async_trait::async_trait;
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
     use std::path::Path;
     use tempfile::TempDir;
     use tokio::sync::Mutex;
@@ -172,6 +211,36 @@ mod tests {
         session_path: PathBuf,
         session: ChatSession,
         queried_projects: Arc<Mutex<Vec<PathBuf>>>,
+    }
+
+    fn two_message_session(
+        session_id: &str,
+        project_path: PathBuf,
+        timestamp: chrono::DateTime<Utc>,
+    ) -> ChatSession {
+        ChatSession {
+            session_id: session_id.to_string(),
+            provider: "mock".to_string(),
+            project_path,
+            started_at: timestamp,
+            updated_at: timestamp,
+            messages: vec![
+                ChatMessage {
+                    id: "msg-1".to_string(),
+                    timestamp,
+                    role: MessageRole::User,
+                    content: "First message".to_string(),
+                    metadata: MessageMetadata::default(),
+                },
+                ChatMessage {
+                    id: "msg-2".to_string(),
+                    timestamp,
+                    role: MessageRole::Assistant,
+                    content: "Second message".to_string(),
+                    metadata: MessageMetadata::default(),
+                },
+            ],
+        }
     }
 
     #[async_trait]
@@ -275,5 +344,177 @@ mod tests {
         let mut entries = tokio::fs::read_dir(&history_dir).await.unwrap();
         let markdown = entries.next_entry().await.unwrap().unwrap().path();
         assert!(markdown.starts_with(&history_dir));
+    }
+
+    #[tokio::test]
+    async fn sync_session_rewrites_stale_markdown_instead_of_reappending_suffix() {
+        let temp_dir = TempDir::new().unwrap();
+        let tracking_root = temp_dir.path().join("tracking-root");
+        let target_project = temp_dir.path().join("tracking-root").join("nested-project");
+        let session_path = temp_dir.path().join("session.jsonl");
+        let history_dir = path::get_waylog_dir(&tracking_root);
+        let markdown_path = history_dir.join("old-session.md");
+
+        tokio::fs::create_dir_all(&history_dir).await.unwrap();
+        tokio::fs::create_dir_all(&target_project).await.unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 7, 3, 39, 25).unwrap();
+        let session = two_message_session("session-1", target_project.clone(), now);
+
+        tokio::fs::write(
+            &markdown_path,
+            r#"---
+provider: mock
+session_id: session-1
+project: /tmp/project
+started_at: 2026-04-07T03:39:25Z
+updated_at: 2026-04-07T03:39:25Z
+message_count: 1
+---
+
+# First message
+
+## 👤 User (2026-04-07 03:39:25 UTC)
+
+First message
+
+## 🤖 Assistant (2026-04-07 03:39:25 UTC)
+
+Second message
+
+## 🤖 Assistant (2026-04-07 03:39:25 UTC)
+
+Second message
+"#,
+        )
+        .await
+        .unwrap();
+
+        let queried_projects = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(MockProvider {
+            session_path: session_path.clone(),
+            session,
+            queried_projects,
+        });
+        let tracker = Arc::new(
+            SessionTracker::new(tracking_root.clone(), provider.clone())
+                .await
+                .unwrap(),
+        );
+        let synchronizer =
+            Synchronizer::new(provider, tracking_root, target_project.clone(), tracker);
+
+        let status = synchronizer
+            .sync_session(&session_path, false)
+            .await
+            .unwrap();
+        assert!(matches!(status, SyncStatus::Synced { new_messages: 1 }));
+
+        let content = tokio::fs::read_to_string(&markdown_path).await.unwrap();
+        assert!(content.contains("message_count: 2"));
+        assert_eq!(content.matches("Second message").count(), 1);
+
+        let tracking_root = target_project.parent().unwrap().to_path_buf();
+        let tracker_provider = Arc::new(MockProvider {
+            session_path: session_path.clone(),
+            session: two_message_session("session-1", target_project.clone(), now),
+            queried_projects: Arc::new(Mutex::new(Vec::new())),
+        });
+        let tracker = Arc::new(
+            SessionTracker::new(tracking_root.clone(), tracker_provider)
+                .await
+                .unwrap(),
+        );
+        let queried_projects = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(MockProvider {
+            session_path: session_path.clone(),
+            session: two_message_session("session-1", target_project.clone(), now),
+            queried_projects,
+        });
+        let synchronizer = Synchronizer::new(provider, tracking_root, target_project, tracker);
+
+        let status = synchronizer
+            .sync_session(&session_path, false)
+            .await
+            .unwrap();
+        assert_eq!(status, SyncStatus::UpToDate);
+    }
+
+    #[test]
+    fn session_markdown_filename_keeps_legacy_shape() {
+        let started_at = Utc.with_ymd_and_hms(2026, 4, 7, 3, 39, 25).unwrap();
+        let session = ChatSession {
+            session_id: "session-1".to_string(),
+            provider: "mock".to_string(),
+            project_path: PathBuf::from("/project"),
+            started_at,
+            updated_at: started_at,
+            messages: vec![ChatMessage {
+                id: "msg-1".to_string(),
+                timestamp: started_at,
+                role: MessageRole::User,
+                content: "Same title".to_string(),
+                metadata: MessageMetadata::default(),
+            }],
+        };
+
+        assert_eq!(
+            session_markdown_filename(&session, "mock"),
+            "2026-04-07_03-39-25Z-mock-same-title.md"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_session_markdown_path_uses_hash_only_for_real_filename_collision() {
+        let temp_dir = TempDir::new().unwrap();
+        let history_dir = temp_dir.path().join(".waylog").join("history");
+        tokio::fs::create_dir_all(&history_dir).await.unwrap();
+
+        let started_at = Utc.with_ymd_and_hms(2026, 4, 7, 3, 39, 25).unwrap();
+        let first = ChatSession {
+            session_id: "session-1".to_string(),
+            provider: "mock".to_string(),
+            project_path: PathBuf::from("/project"),
+            started_at,
+            updated_at: started_at,
+            messages: vec![ChatMessage {
+                id: "msg-1".to_string(),
+                timestamp: started_at,
+                role: MessageRole::User,
+                content: "Same title".to_string(),
+                metadata: MessageMetadata::default(),
+            }],
+        };
+        let mut second = first.clone();
+        second.session_id = "session-2".to_string();
+
+        let legacy_path = history_dir.join(session_markdown_filename(&first, "mock"));
+        assert_eq!(
+            resolve_session_markdown_path(&history_dir, &first, "mock")
+                .await
+                .unwrap(),
+            legacy_path
+        );
+
+        exporter::create_markdown_file(&legacy_path, &first)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resolve_session_markdown_path(&history_dir, &first, "mock")
+                .await
+                .unwrap(),
+            legacy_path
+        );
+
+        let collision_path = resolve_session_markdown_path(&history_dir, &second, "mock")
+            .await
+            .unwrap();
+        assert_ne!(collision_path, legacy_path);
+        assert!(collision_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("2026-04-07_03-39-25Z-mock-same-title-"));
     }
 }

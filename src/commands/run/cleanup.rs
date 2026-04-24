@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::synchronizer::resolve_session_markdown_path;
 use crate::{exporter, providers, session};
 use std::sync::Arc;
 use tokio::process::Child;
@@ -40,32 +41,12 @@ pub(crate) async fn cleanup_and_sync(
                     if let Some(existing) = tracker.get_markdown_path(&session.session_id).await {
                         existing
                     } else {
-                        let slug = session
-                            .messages
-                            .iter()
-                            .find(|m| m.role == crate::providers::base::MessageRole::User)
-                            .map(|m| crate::utils::string::slugify(&m.content))
-                            .unwrap_or_else(|| session.session_id.clone());
-
-                        let timestamp = session.started_at.format("%Y-%m-%d_%H-%M-%SZ");
-                        let filename = format!("{}-{}-{}.md", timestamp, provider.name(), slug);
-                        waylog_dir.join(filename)
+                        resolve_session_markdown_path(waylog_dir, &session, provider.name()).await?
                     };
 
-                let synced_count = tracker.get_synced_count(&session.session_id).await;
-
-                // Perform sync - errors are logged but don't stop cleanup
-                match (synced_count == 0, &markdown_path) {
-                    (true, path) => {
-                        if let Err(e) = exporter::create_markdown_file(path, &session).await {
-                            tracing::error!("Failed to create markdown file: {}", e);
-                        }
-                    }
-                    (false, path) => {
-                        if let Err(e) = exporter::append_messages(path, &new_messages).await {
-                            tracing::error!("Failed to append messages: {}", e);
-                        }
-                    }
+                // Rewrite from provider source so frontmatter remains authoritative.
+                if let Err(e) = exporter::create_markdown_file(&markdown_path, &session).await {
+                    tracing::error!("Failed to write markdown file: {}", e);
                 }
 
                 if let Err(e) = tracker

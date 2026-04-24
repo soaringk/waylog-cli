@@ -1,3 +1,5 @@
+use sha2::{Digest, Sha256};
+
 /// Create a safe filename slug from chat titles or messages
 pub fn slugify(text: &str) -> String {
     // Take first 50 chars
@@ -42,6 +44,19 @@ pub fn slugify(text: &str) -> String {
     }
 }
 
+/// Create a short stable fingerprint for distinguishing otherwise identical filenames.
+pub fn short_hash(text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    let digest = hasher.finalize();
+
+    digest
+        .iter()
+        .take(6)
+        .map(|byte| format!("{:02x}", byte))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,5 +67,12 @@ mod tests {
         assert_eq!(slugify("Hello   World"), "hello-world");
         assert_eq!(slugify("!@#$"), "new-chat");
         assert_eq!(slugify("Simple"), "simple");
+    }
+
+    #[test]
+    fn test_short_hash_is_stable_and_short() {
+        assert_eq!(short_hash("session-1"), short_hash("session-1"));
+        assert_ne!(short_hash("session-1"), short_hash("session-2"));
+        assert_eq!(short_hash("session-1").len(), 12);
     }
 }
