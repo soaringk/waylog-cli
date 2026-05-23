@@ -47,6 +47,7 @@ pub async fn handle_pull(
     } else {
         // Sync all known providers
         vec![
+            providers::get_provider("antigravity")?,
             providers::get_provider("claude")?,
             providers::get_provider("gemini")?,
             providers::get_provider("codex")?,
