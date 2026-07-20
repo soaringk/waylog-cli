@@ -274,7 +274,7 @@ async fn run_agent(
                     &mut child,
                     &tracker,
                     &provider,
-                    &project_path,
+                    &target_project_path,
                     &waylog_dir,
                     Some(status),
                 )

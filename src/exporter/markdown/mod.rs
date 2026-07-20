@@ -1,10 +1,9 @@
 mod formatter;
 
 use crate::error::Result;
-use crate::providers::base::{ChatMessage, ChatSession};
+use crate::providers::base::ChatSession;
 use std::path::Path;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
 
 /// Generate markdown content from a chat session
 pub fn generate_markdown(session: &ChatSession) -> String {
@@ -52,24 +51,6 @@ pub fn generate_markdown(session: &ChatSession) -> String {
     md
 }
 
-/// Append new messages to an existing markdown file
-pub async fn append_messages(file_path: &Path, messages: &[ChatMessage]) -> Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(file_path)
-        .await?;
-
-    for message in messages {
-        let content = formatter::format_message(message);
-        file.write_all(content.as_bytes()).await?;
-        file.write_all(b"\n\n").await?;
-    }
-
-    file.flush().await?;
-    Ok(())
-}
-
 /// Create a new markdown file with the full session
 pub async fn create_markdown_file(file_path: &Path, session: &ChatSession) -> Result<()> {
     let content = generate_markdown(session);
@@ -80,7 +61,7 @@ pub async fn create_markdown_file(file_path: &Path, session: &ChatSession) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::base::{MessageRole, TokenUsage};
+    use crate::providers::base::{ChatMessage, MessageRole, TokenUsage};
     use chrono::Utc;
     use tempfile::TempDir;
 
@@ -332,43 +313,5 @@ mod tests {
         let content = tokio::fs::read_to_string(&file_path).await.unwrap();
         assert!(content.contains("Hello"));
         assert!(content.contains("Hi!"));
-    }
-
-    #[tokio::test]
-    async fn test_append_messages() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("test.md");
-
-        // Create file first
-        let initial_messages = vec![create_test_message(MessageRole::User, "First message")];
-        let initial_session = create_test_session(initial_messages);
-        create_markdown_file(&file_path, &initial_session)
-            .await
-            .unwrap();
-
-        // Append new messages
-        let new_messages = vec![create_test_message(
-            MessageRole::Assistant,
-            "Second message",
-        )];
-        append_messages(&file_path, &new_messages).await.unwrap();
-
-        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
-        assert!(content.contains("First message"));
-        assert!(content.contains("Second message"));
-    }
-
-    #[tokio::test]
-    async fn test_append_messages_to_new_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("new.md");
-
-        // Append to non-existent file
-        let messages = vec![create_test_message(MessageRole::User, "New message")];
-        append_messages(&file_path, &messages).await.unwrap();
-
-        assert!(file_path.exists());
-        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
-        assert!(content.contains("New message"));
     }
 }
