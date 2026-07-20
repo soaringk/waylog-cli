@@ -1,0 +1,62 @@
+version: 1
+documents:
+  - kind: architecture
+    scope: system-overview
+    path: docs/architecture/system-overview.md
+    purpose: Current structure, boundaries, and evolution context.
+    query_tags:
+      - architecture
+      - boundaries
+      - evolution
+  - kind: constraint
+    scope: engineering-constraints
+    path: docs/constraints/engineering-constraints.md
+    purpose: Stable rules, invariants, and compatibility boundaries.
+    query_tags:
+      - constraints
+      - compatibility
+      - workflow
+  - kind: decision
+    scope: decision-log
+    path: docs/decisions/decision-log.md
+    purpose: Durable implementation or design decisions.
+    query_tags:
+      - decisions
+      - rationale
+  - kind: lesson
+    scope: lessons-learned
+    path: docs/lessons/lessons-learned.md
+    purpose: Reusable lessons future contributors should not rediscover.
+    query_tags:
+      - lessons
+      - pitfalls
+  - kind: risk/open_question
+    scope: tech-debt-and-risks
+    path: docs/risks/tech-debt-and-risks.md
+    purpose: Open risks, debt, and unresolved questions.
+    query_tags:
+      - risks
+      - debt
+      - open-questions
+  - kind: guide
+    scope: user-guide
+    path: README.md
+    purpose: Canonical English installation, usage, and provider guide.
+    query_tags:
+      - user-guide
+      - installation
+      - usage
+  - kind: guide
+    scope: user-guide-zh
+    path: README_zh.md
+    purpose: Chinese installation, usage, and provider guide.
+    query_tags:
+      - user-guide
+      - chinese
+  - kind: changelog
+    scope: releases
+    path: CHANGELOG.md
+    purpose: User-facing features and critical fixes from version 0.3.0 onward.
+    query_tags:
+      - changelog
+      - releases

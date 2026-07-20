@@ -1,0 +1,9 @@
+# Lessons Learned
+
+## Lessons
+
+- Title-derived filenames are not stable identities; include the provider session ID to prevent collisions.
+- Tests that pull from a developer environment can copy private histories; use synthetic fixtures and temporary directories.
+- Validate provider names before project initialization so invalid input has no prompt or filesystem side effects.
+- Test observed provider formats because their storage evolves independently of WayLog.
+- Put targeted lookup in the provider that understands the native storage instead of parsing every session.

@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -41,6 +41,8 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -101,9 +103,13 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Verify tag matches Cargo package version
         shell: bash
