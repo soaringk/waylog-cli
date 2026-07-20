@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 
 /// Session tracker - manages active sessions and their sync state
 pub struct SessionTracker {
-    project_dir: PathBuf,
+    history_dir: PathBuf,
     provider: Arc<dyn Provider>,
     state: Arc<Mutex<ProjectState>>,
 }
@@ -17,20 +17,27 @@ pub struct SessionTracker {
 impl SessionTracker {
     /// Create a new session tracker
     pub async fn new(project_dir: PathBuf, provider: Arc<dyn Provider>) -> Result<Self> {
+        Self::new_with_history_dir(crate::utils::path::get_waylog_dir(&project_dir), provider).await
+    }
+
+    pub async fn new_with_history_dir(
+        history_dir: PathBuf,
+        provider: Arc<dyn Provider>,
+    ) -> Result<Self> {
         // Start with empty state (stateless design)
         let state = ProjectState {
             sessions: std::collections::HashMap::new(),
         };
 
         let tracker = Self {
-            project_dir,
+            history_dir,
             provider,
             state: Arc::new(Mutex::new(state)),
         };
 
         // Restore state from existing markdown files
         let sessions_map =
-            restore::restore_from_disk(&tracker.project_dir, tracker.provider.name()).await?;
+            restore::restore_from_disk(&tracker.history_dir, tracker.provider.name()).await?;
         if !sessions_map.is_empty() {
             let mut state = tracker.state.lock().await;
             state.sessions = sessions_map;

@@ -69,6 +69,17 @@ pub trait Provider: Send + Sync {
     /// Find the latest session file for the current project
     async fn find_latest_session(&self, project_path: &Path) -> Result<Option<PathBuf>>;
 
+    /// Find one session by its provider session ID.
+    async fn find_session(&self, project_path: &Path, session_id: &str) -> Result<Option<PathBuf>> {
+        for session_path in self.get_all_sessions(project_path).await? {
+            let session = self.parse_session(&session_path).await?;
+            if session.session_id == session_id {
+                return Ok(Some(session_path));
+            }
+        }
+        Ok(None)
+    }
+
     /// Parse a session file and return a chat session
     async fn parse_session(&self, file_path: &Path) -> Result<ChatSession>;
 

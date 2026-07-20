@@ -1,12 +1,12 @@
 [package]
 name = "waylog"
-version = "0.2.5"
+version = "0.3.0"
 edition = "2021"
 authors = ["WayLog Contributors"]
-description = "Automatically save chats from Claude, Codex, and Gemini CLI to local Markdown files."
+description = "Automatically save chats from Claude, Codex, Gemini, and OpenCode to local Markdown files."
 license = "Apache-2.0"
-repository = "https://github.com/shayne-snap/waylog-cli"
-homepage = "https://github.com/shayne-snap/waylog-cli"
+repository = "https://github.com/soaringk/waylog-cli"
+homepage = "https://github.com/soaringk/waylog-cli"
 build = "build.rs"
 
 [[bin]]
@@ -61,6 +61,7 @@ async-trait = "0.1"
 # UUID generation
 uuid = { version = "1.6", features = ["v4"] }
 regex = "1.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3.8"

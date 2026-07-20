@@ -31,7 +31,7 @@ pub enum OutputFormat {
 pub enum Commands {
     /// Run an AI CLI tool and automatically sync its chat history
     Run {
-        /// The AI tool to run (antigravity, codex, claude, gemini)
+        /// The AI tool to run (antigravity, codex, claude, gemini, opencode)
         agent: Option<String>,
 
         /// Additional arguments to pass to the agent
@@ -56,5 +56,38 @@ pub enum Commands {
         /// Include hidden directories when using --recursive
         #[arg(long, visible_alias = "hiden", requires = "recursive")]
         hidden: bool,
+
+        /// Pull only this provider session ID
+        #[arg(long, requires = "provider", conflicts_with = "recursive")]
+        session: Option<String>,
+
+        /// Write Markdown files directly to this directory
+        #[arg(long, value_name = "DIR", requires = "session")]
+        output_dir: Option<std::path::PathBuf>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_directory_requires_one_session() {
+        assert!(Cli::try_parse_from(["waylog", "pull", "--output-dir", "/tmp/out"]).is_err());
+    }
+
+    #[test]
+    fn one_session_accepts_a_custom_output_directory() {
+        assert!(Cli::try_parse_from([
+            "waylog",
+            "pull",
+            "--provider",
+            "opencode",
+            "--session",
+            "ses_test",
+            "--output-dir",
+            "/tmp/out",
+        ])
+        .is_ok());
+    }
 }

@@ -86,6 +86,32 @@ impl Provider for CodexProvider {
         Ok(candidates.into_iter().next().map(|(p, _)| p))
     }
 
+    async fn find_session(&self, project_path: &Path, session_id: &str) -> Result<Option<PathBuf>> {
+        let base_session_dir = self.data_dir()?;
+        if !base_session_dir.exists() {
+            return Ok(None);
+        }
+
+        for entry in walkdir::WalkDir::new(base_session_dir) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
+                && (stem == session_id || stem.ends_with(session_id))
+                && self.probe_project_path(path, project_path).await?
+            {
+                return Ok(Some(path.to_path_buf()));
+            }
+        }
+
+        Ok(None)
+    }
+
     async fn get_all_sessions(&self, project_path: &Path) -> Result<Vec<PathBuf>> {
         let base_session_dir = self.data_dir()?;
 

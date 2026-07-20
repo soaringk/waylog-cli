@@ -10,16 +10,31 @@ use std::sync::Arc;
 use tracing::debug;
 use walkdir::{DirEntry, WalkDir};
 
+pub struct PullOptions {
+    pub provider_name: Option<String>,
+    pub force: bool,
+    pub recursive: bool,
+    pub include_hidden: bool,
+    pub session_id: Option<String>,
+    pub output_dir: Option<PathBuf>,
+    pub verbose: bool,
+}
+
 pub async fn handle_pull(
-    provider_name: Option<String>,
-    force: bool,
-    recursive: bool,
-    include_hidden: bool,
-    verbose: bool,
+    options: PullOptions,
     tracking_root: PathBuf,
     target_project_path: PathBuf,
     output: &mut Output,
 ) -> Result<()> {
+    let PullOptions {
+        provider_name,
+        force,
+        recursive,
+        include_hidden,
+        session_id,
+        output_dir,
+        verbose,
+    } = options;
     // 1. Validate provider first (before any other operations)
     // This ensures we catch invalid providers even if project is not initialized
     if let Some(ref name) = provider_name {
@@ -42,23 +57,23 @@ pub async fn handle_pull(
     };
 
     // Filter providers
+    let provider_was_selected = provider_name.is_some();
     let providers_to_sync = if let Some(name) = provider_name {
         vec![providers::get_provider(&name)?]
     } else {
-        // Sync all known providers
-        vec![
-            providers::get_provider("antigravity")?,
-            providers::get_provider("claude")?,
-            providers::get_provider("gemini")?,
-            providers::get_provider("codex")?,
-        ]
+        providers::list_providers()
+            .into_iter()
+            .map(providers::get_provider)
+            .collect::<Result<Vec<_>>>()?
     };
 
     let mut total_synced = 0;
     let mut total_uptodate = 0;
+    let mut total_tasks = 0;
+    let mut total_failed = 0;
 
     for provider in providers_to_sync {
-        if !provider.is_installed() {
+        if !provider_was_selected && !provider.is_installed() {
             debug!("Skipping {} (not installed)", provider.name());
             continue;
         }
@@ -66,71 +81,90 @@ pub async fn handle_pull(
         // Recursive mode intentionally aggregates all descendant sessions into the
         // resolved tracking root for this invocation. Nested `.waylog` projects are
         // not treated as separate sync targets unless the user runs `pull` there.
-        let tracker =
-            Arc::new(session::SessionTracker::new(tracking_root.clone(), provider.clone()).await?);
-        let synchronizer = synchronizer::Synchronizer::new(
+        let history_dir = output_dir
+            .clone()
+            .unwrap_or_else(|| crate::utils::path::get_waylog_dir(&tracking_root));
+        let tracker = Arc::new(
+            session::SessionTracker::new_with_history_dir(history_dir.clone(), provider.clone())
+                .await?,
+        );
+        let synchronizer = synchronizer::Synchronizer::new_with_history_dir(
             provider.clone(),
-            tracking_root.clone(),
+            history_dir,
             target_project_path.clone(),
             tracker.clone(),
         );
 
-        let session_paths = collect_session_paths(provider.clone(), &project_paths).await?;
+        let session_paths = if let Some(session_id) = &session_id {
+            let session_path = provider
+                .find_session(&target_project_path, session_id)
+                .await?
+                .ok_or_else(|| WaylogError::SessionNotFound {
+                    provider: provider.name().to_string(),
+                    session_id: session_id.clone(),
+                })?;
+            vec![session_path]
+        } else {
+            collect_session_paths(provider.clone(), &project_paths).await?
+        };
 
-        match synchronizer.sync_paths(session_paths, force).await {
-            Ok(results) => {
-                // Print section header
-                output.provider_header(provider.name(), results.len())?;
+        let results = synchronizer.sync_paths(session_paths, force).await?;
+        total_tasks += results.len();
 
-                let mut provider_uptodate = 0;
-                let mut provider_synced = 0;
-                let mut provider_skipped = 0;
-                let mut _provider_failed = 0;
+        // Print section header
+        output.provider_header(provider.name(), results.len())?;
 
-                for (path, status) in results {
-                    let filename = path.file_name().unwrap_or_default().to_string_lossy();
-                    match status {
-                        SyncStatus::Synced { new_messages } => {
-                            output.synced(&filename, new_messages, verbose)?;
-                            provider_synced += 1;
-                        }
-                        SyncStatus::UpToDate => {
-                            output.up_to_date(&filename, verbose)?;
-                            provider_uptodate += 1;
-                        }
-                        SyncStatus::Failed(e) => {
-                            output.failed(&filename, &e.to_string())?;
-                            _provider_failed += 1;
-                        }
-                        SyncStatus::Skipped => {
-                            output.skipped(&filename, verbose)?;
-                            provider_skipped += 1;
-                        }
-                    }
+        let mut provider_uptodate = 0;
+        let mut provider_synced = 0;
+        let mut provider_skipped = 0;
+
+        for (path, status) in results {
+            let filename = path.file_name().unwrap_or_default().to_string_lossy();
+            match status {
+                SyncStatus::Synced { new_messages } => {
+                    output.synced(&filename, new_messages, verbose)?;
+                    provider_synced += 1;
                 }
-
-                if !verbose {
-                    output.summary_compact(provider_synced, provider_uptodate)?;
+                SyncStatus::UpToDate => {
+                    output.up_to_date(&filename, verbose)?;
+                    provider_uptodate += 1;
                 }
-                if verbose && provider_skipped > 0 {
-                    output.skipped(&format!("{} sessions", provider_skipped), verbose)?;
+                SyncStatus::Failed(e) => {
+                    output.failed(&filename, &e)?;
+                    total_failed += 1;
                 }
-
-                total_synced += provider_synced;
-                total_uptodate += provider_uptodate;
-            }
-            Err(e) => {
-                tracing::error!("Failed to scan {}: {}", provider.name(), e);
+                SyncStatus::Skipped => {
+                    output.skipped(&filename, verbose)?;
+                    provider_skipped += 1;
+                }
             }
         }
+
+        if !verbose {
+            output.summary_compact(provider_synced, provider_uptodate)?;
+        }
+        if verbose && provider_skipped > 0 {
+            output.skipped(&format!("{} sessions", provider_skipped), verbose)?;
+        }
+
+        total_synced += provider_synced;
+        total_uptodate += provider_uptodate;
 
         // Save state after each provider
         tracker.save_state().await?;
     }
 
+    if all_tasks_failed(total_tasks, total_failed) {
+        return Err(WaylogError::AllSessionsFailed(total_failed));
+    }
+
     output.summary(total_synced, total_uptodate)?;
 
     Ok(())
+}
+
+fn all_tasks_failed(total: usize, failed: usize) -> bool {
+    total > 0 && failed == total
 }
 
 fn collect_project_paths(root: &Path, include_hidden: bool) -> Vec<PathBuf> {
@@ -336,5 +370,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(sessions, vec![shared, unique]);
+    }
+
+    #[test]
+    fn pull_fails_only_when_every_attempted_session_failed() {
+        assert!(all_tasks_failed(1, 1));
+        assert!(all_tasks_failed(3, 3));
+        assert!(!all_tasks_failed(3, 2));
+        assert!(!all_tasks_failed(0, 0));
     }
 }

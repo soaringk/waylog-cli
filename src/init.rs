@@ -26,6 +26,10 @@ pub fn resolve_project_root(command: &Commands, output: &mut Output) -> Result<(
     let found_root = crate::utils::path::find_project_root();
 
     match command {
+        Commands::Pull {
+            output_dir: Some(_),
+            ..
+        } => Ok((std::env::current_dir()?, false)),
         Commands::Pull { .. } => match found_root {
             Some(root) => {
                 output.found_tracking(&root)?;

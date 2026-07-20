@@ -1,11 +1,11 @@
 # WayLog CLI
 
-[![GitHub license](https://img.shields.io/github/license/shayne-snap/waylog-cli?style=flat-square)](https://github.com/shayne-snap/waylog-cli/blob/main/LICENSE)
+[![GitHub license](https://img.shields.io/github/license/soaringk/waylog-cli?style=flat-square)](https://github.com/soaringk/waylog-cli/blob/main/LICENSE)
 ![Rust](https://img.shields.io/badge/built_with-Rust-dca282.svg?style=flat-square)
 
 **Seamlessly sync, preserve, and version-control your AI coding conversations locally.**
 
-WayLog CLI is a lightweight tool written in Rust that automatically saves your AI coding sessions (Claude Code, Gemini CLI, OpenAI Codex CLI) into clean, searchable local Markdown files. Stop losing your context to session timeouts—WayLog CLI helps you own your AI history locally.
+WayLog CLI is a lightweight tool written in Rust that automatically saves your AI coding sessions (Claude Code, Gemini CLI, OpenAI Codex CLI, OpenCode) into clean, searchable local Markdown files. Stop losing your context to session timeouts—WayLog CLI helps you own your AI history locally.
 
 [中文文档](README_zh.md) | [English](README.md)
 
@@ -20,24 +20,19 @@ WayLog CLI is a lightweight tool written in Rust that automatically saves your A
 
 ## 🚀 Installation
 
-### Using Homebrew
+### macOS / Linux
 
 ```bash
-brew install shayne-snap/tap/waylog
+curl -fsSL https://raw.githubusercontent.com/soaringk/waylog-cli/main/scripts/install.sh | sh
 ```
 
-### Using Scoop (Windows)
+### Windows PowerShell
 
 ```powershell
-scoop bucket add waylog https://github.com/shayne-snap/scoop-bucket
-scoop install waylog
+irm https://raw.githubusercontent.com/soaringk/waylog-cli/main/scripts/install.ps1 | iex
 ```
 
-### Using Cargo
-
-```bash
-cargo install waylog
-```
+The installers select the matching GitHub Release binary for macOS, Linux, or Windows on x64 or ARM64 and verify its SHA-256 checksum. Set `WAYLOG_VERSION` (for example, `0.3.0`) before running the installer to pin a release instead of using the latest version.
 
 
 ## 💡 Usage
@@ -71,6 +66,9 @@ Scans your local AI provider storage and "pulls" all relevant sessions into your
 ```bash
 # Pull all history for the current project
 waylog pull
+
+# Pull one session into a caller-managed directory (useful for hooks)
+waylog pull --provider opencode --session <session-id> --output-dir <directory>
 ```
 ![WayLog Pull Demo](demo/pull.gif)
 
@@ -81,13 +79,14 @@ waylog pull
 | **Claude Code** | 🚧 Beta | Supports `claude` CLI tool from Anthropic. |
 | **Gemini CLI** | 🚧 Beta | Supports Google's Gemini CLI tools. |
 | **Codex** | 🚧 Beta | Supports OpenAI Codex CLI. |
+| **OpenCode** | 🚧 Beta | Reads OpenCode sessions from its local SQLite database. |
 
-### Dev build
+### Development build
 
 ```bash
-git clone https://github.com/shayne-snap/waylog-cli.git
+git clone https://github.com/soaringk/waylog-cli.git
 cd waylog-cli
-./scripts/install.sh
+cargo build --release --locked
 ```
 
 

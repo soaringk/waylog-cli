@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::synchronizer::resolve_session_markdown_path;
+use crate::synchronizer::session_markdown_filename;
 use crate::{exporter, providers, session};
 use std::sync::Arc;
 use tokio::process::Child;
@@ -41,7 +41,7 @@ pub(crate) async fn cleanup_and_sync(
                     if let Some(existing) = tracker.get_markdown_path(&session.session_id).await {
                         existing
                     } else {
-                        resolve_session_markdown_path(waylog_dir, &session, provider.name()).await?
+                        waylog_dir.join(session_markdown_filename(&session, provider.name()))
                     };
 
                 // Rewrite from provider source so frontmatter remains authoritative.

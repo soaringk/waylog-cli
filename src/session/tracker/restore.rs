@@ -7,10 +7,9 @@ use tokio::fs;
 /// Scan markdown files to restore session state
 /// Returns a map of session_id -> SessionState
 pub(crate) async fn restore_from_disk(
-    project_dir: &std::path::Path,
+    history_dir: &std::path::Path,
     provider_name: &str,
 ) -> Result<HashMap<String, SessionState>> {
-    let history_dir = crate::utils::path::get_waylog_dir(project_dir);
     if !history_dir.exists() {
         return Ok(HashMap::new());
     }

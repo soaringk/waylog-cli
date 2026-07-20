@@ -3,65 +3,43 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  create-release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-    steps:
-      - name: Create Release
-        id: create_release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: WayLog ${{ github.ref_name }}
-          draft: true
-          prerelease: false
-          make_latest: false
-          generate_release_notes: true
-
-  publish-crates:
-    name: Publish to crates.io
-    needs: create-release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CARGO_TOKEN }}
-
-  build-release:
-    name: Build & Upload
-    needs: create-release
-    runs-on: ${{ matrix.os }}
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            artifact_name: waylog
-            asset_name: waylog-macos-arm64
+          - runner: macos-15
             target: aarch64-apple-darwin
-          - os: ubuntu-latest
-            artifact_name: waylog
-            asset_name: waylog-linux-x64
+            archive: waylog-aarch64-apple-darwin.tar.gz
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            archive: waylog-x86_64-apple-darwin.tar.gz
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            archive: waylog-aarch64-unknown-linux-musl.tar.gz
+          - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
-          - os: windows-latest
-            artifact_name: waylog.exe
-            asset_name: waylog-windows-x64
+            archive: waylog-x86_64-unknown-linux-musl.tar.gz
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            archive: waylog-aarch64-pc-windows-msvc.zip
+          - runner: windows-2025
             target: x86_64-pc-windows-msvc
+            archive: waylog-x86_64-pc-windows-msvc.zip
 
     steps:
-      - name: Checkout code
+      - name: Checkout source
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
@@ -69,101 +47,85 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install musl-tools (Linux)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Install musl compiler
+        if: runner.os == 'Linux'
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
+          echo "CC=musl-gcc" >> "$GITHUB_ENV"
 
-      - name: Build binary
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Package binary
+      - name: Smoke-test Unix binary
+        if: runner.os != 'Windows'
+        shell: bash
+        run: "target/${{ matrix.target }}/release/waylog --version"
+
+      - name: Smoke-test Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: "& target/${{ matrix.target }}/release/waylog.exe --version"
+
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
         shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            7z a ../../../${{ matrix.asset_name }}.zip ${{ matrix.artifact_name }}
+          mkdir -p dist
+          tar -C "target/${{ matrix.target }}/release" -czf "dist/${{ matrix.archive }}" waylog
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "dist/${{ matrix.archive }}" | cut -d ' ' -f 1 > "dist/${{ matrix.archive }}.sha256"
           else
-            tar -czf ../../../${{ matrix.asset_name }}.tar.gz ${{ matrix.artifact_name }}
+            shasum -a 256 "dist/${{ matrix.archive }}" | cut -d ' ' -f 1 > "dist/${{ matrix.archive }}.sha256"
           fi
-          cd ../../..
 
-      - name: Upload Release Asset
-        uses: softprops/action-gh-release@v1
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $archive = "dist/${{ matrix.archive }}"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/waylog.exe" -DestinationPath $archive
+          (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant() |
+            Set-Content -Encoding ascii "$archive.sha256"
+
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@v4
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          files: |
-            ${{ matrix.asset_name }}.tar.gz
-            ${{ matrix.asset_name }}.zip
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
 
-  update-formula:
-    name: Update Homebrew Formula
-    needs: build-release
-    runs-on: ubuntu-latest
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout Homebrew Tap
+      - name: Checkout source
         uses: actions/checkout@v4
-        with:
-          repository: shayne-snap/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: homebrew-tap
 
-      - name: Get Release Info
-        id: get_release
-        uses: actions/github-script@v7
-        with:
-          result-encoding: string
-          script: |
-            const release = await github.rest.repos.getReleaseByTag({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag: context.ref.replace('refs/tags/', '')
-            });
-            // Find the macOS artifact for Homebrew
-            const asset = release.data.assets.find(a => a.name.includes('macos-arm64'));
-            if (!asset) {
-               throw new Error("macOS asset not found");
-            }
-            return asset.browser_download_url;
-
-      - name: Calculate SHA256
-        id: shasum
+      - name: Verify tag matches Cargo package version
+        shell: bash
         run: |
-          # The asset is in a draft release, so we need a token to download it if we use API, 
-          # but browser_download_url usually requires authentication for drafts too.
-          # Actually, for drafts, browser_download_url might respond 404 to curl without auth.
-          # But since we are inside Actions, we can try using the GITHUB_TOKEN header.
-          
-          curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -H "Accept: application/octet-stream" -o waylog.tar.gz ${{ steps.get_release.outputs.result }}
-          echo "sha256=$(sha256sum waylog.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          package_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          test "v${package_version}" = "${GITHUB_REF_NAME}"
 
-      - name: Update Formula
+      - name: Download packaged binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
-          cd homebrew-tap
-          mkdir -p Formula
-          
-          cat > Formula/waylog.rb << EOF
-          class Waylog < Formula
-            desc "Seamlessly sync, preserve, and version-control your AI coding conversations locally"
-            homepage "https://github.com/shayne-snap/waylog-cli"
-            url "${{ steps.get_release.outputs.result }}"
-            sha256 "${{ steps.shasum.outputs.sha256 }}"
-            version "${{ github.ref_name }}"
-            license "Apache-2.0"
-
-            def install
-              bin.install "waylog"
-            end
-
-            test do
-              system "#{bin}/waylog", "--version"
-            end
-          end
-          EOF
-          
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/waylog.rb
-          git commit -m "update: waylog ${{ github.ref_name }}"
-          git push
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --verify-tag \
+              --generate-notes \
+              --title "WayLog ${GITHUB_REF_NAME}"

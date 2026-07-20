@@ -11,6 +11,15 @@ pub enum WaylogError {
     #[error("Provider not found: {0}")]
     ProviderNotFound(String),
 
+    #[error("Session not found for {provider}: {session_id}")]
+    SessionNotFound {
+        provider: String,
+        session_id: String,
+    },
+
+    #[error("All {0} session sync tasks failed")]
+    AllSessionsFailed(usize),
+
     #[error("Path error: {0}")]
     PathError(String),
 
@@ -39,11 +48,15 @@ impl WaylogError {
             // Data format errors
             WaylogError::Json(_) => exitcode::DATAERR,
             // Input file/resource errors
-            WaylogError::ProjectNotFound | WaylogError::Io(_) => exitcode::NOINPUT,
+            WaylogError::ProjectNotFound
+            | WaylogError::SessionNotFound { .. }
+            | WaylogError::Io(_) => exitcode::NOINPUT,
             // Service unavailable
             WaylogError::AgentNotInstalled(_) => exitcode::UNAVAILABLE,
             // Internal software errors
-            WaylogError::PathError(_) | WaylogError::Internal(_) => exitcode::SOFTWARE,
+            WaylogError::AllSessionsFailed(_)
+            | WaylogError::PathError(_)
+            | WaylogError::Internal(_) => exitcode::SOFTWARE,
             // Child process exit code (propagate directly)
             WaylogError::ChildProcessFailed(code) => *code,
         }

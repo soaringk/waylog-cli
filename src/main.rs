@@ -12,7 +12,7 @@ mod watcher;
 
 use clap::Parser;
 use cli::{Cli, Commands, OutputFormat};
-use commands::{handle_pull, handle_run};
+use commands::{handle_pull, handle_run, PullOptions};
 use error::WaylogError;
 use output::Output;
 use std::io::Write;
@@ -75,13 +75,19 @@ async fn main() {
                 force,
                 recursive,
                 hidden,
+                session,
+                output_dir,
             } => {
                 handle_pull(
-                    provider,
-                    force,
-                    recursive,
-                    hidden,
-                    cli.verbose,
+                    PullOptions {
+                        provider_name: provider,
+                        force,
+                        recursive,
+                        include_hidden: hidden,
+                        session_id: session,
+                        output_dir,
+                        verbose: cli.verbose,
+                    },
                     project_root,
                     current_dir,
                     &mut output,

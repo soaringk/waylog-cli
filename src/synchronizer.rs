@@ -10,7 +10,7 @@ use tracing::debug;
 /// Shared synchronization logic for both watcher and batch sync
 pub struct Synchronizer {
     provider: Arc<dyn Provider>,
-    tracking_root: PathBuf,
+    history_dir: PathBuf,
     target_project_dir: PathBuf,
     tracker: Arc<SessionTracker>,
 }
@@ -30,9 +30,23 @@ impl Synchronizer {
         target_project_dir: PathBuf,
         tracker: Arc<SessionTracker>,
     ) -> Self {
+        Self::new_with_history_dir(
+            provider,
+            path::get_waylog_dir(&tracking_root),
+            target_project_dir,
+            tracker,
+        )
+    }
+
+    pub fn new_with_history_dir(
+        provider: Arc<dyn Provider>,
+        history_dir: PathBuf,
+        target_project_dir: PathBuf,
+        tracker: Arc<SessionTracker>,
+    ) -> Self {
         Self {
             provider,
-            tracking_root,
+            history_dir,
             target_project_dir,
             tracker,
         }
@@ -85,14 +99,11 @@ impl Synchronizer {
             if let Some(s) = state.get_session(&session.session_id) {
                 (s.markdown_path.clone(), s.synced_message_count)
             } else {
-                let path = resolve_session_markdown_path(
-                    &path::get_waylog_dir(&self.tracking_root),
-                    &session,
-                    self.provider.name(),
+                (
+                    self.history_dir
+                        .join(session_markdown_filename(&session, self.provider.name())),
+                    0,
                 )
-                .await?;
-
-                (path, 0)
             };
 
         // 3. Handle force/missing file
@@ -147,25 +158,6 @@ impl Synchronizer {
     }
 }
 
-pub(crate) async fn resolve_session_markdown_path(
-    history_dir: &Path,
-    session: &crate::providers::base::ChatSession,
-    provider_name: &str,
-) -> Result<PathBuf> {
-    let legacy_path = history_dir.join(session_markdown_filename(session, provider_name));
-
-    if !legacy_path.exists() {
-        return Ok(legacy_path);
-    }
-
-    match exporter::parse_frontmatter(&legacy_path).await {
-        Ok(frontmatter) if frontmatter.session_id.as_deref() == Some(&session.session_id) => {
-            Ok(legacy_path)
-        }
-        _ => Ok(history_dir.join(session_markdown_filename_with_id(session, provider_name))),
-    }
-}
-
 pub(crate) fn session_markdown_filename(
     session: &crate::providers::base::ChatSession,
     provider_name: &str,
@@ -176,23 +168,22 @@ pub(crate) fn session_markdown_filename(
         .find(|m| m.role == crate::providers::base::MessageRole::User)
         .map(|m| crate::utils::string::slugify(&m.content))
         .unwrap_or_else(|| crate::utils::string::slugify(&session.session_id));
+    let session_id = session_id_filename_component(&session.session_id);
     let timestamp = session.started_at.format("%Y-%m-%d_%H-%M-%SZ");
 
-    format!("{}-{}-{}.md", timestamp, provider_name, slug)
+    format!("{}-{}-{}-{}.md", timestamp, provider_name, session_id, slug)
 }
 
-fn session_markdown_filename_with_id(
-    session: &crate::providers::base::ChatSession,
-    provider_name: &str,
-) -> String {
-    let legacy_filename = session_markdown_filename(session, provider_name);
-    let session_hash = crate::utils::string::short_hash(&session.session_id);
-
-    if let Some(stem) = legacy_filename.strip_suffix(".md") {
-        format!("{}-{}.md", stem, session_hash)
-    } else {
-        format!("{}-{}.md", legacy_filename, session_hash)
-    }
+fn session_id_filename_component(session_id: &str) -> String {
+    session_id
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -441,7 +432,7 @@ Second message
     }
 
     #[test]
-    fn session_markdown_filename_keeps_legacy_shape() {
+    fn session_markdown_filename_includes_session_id() {
         let started_at = Utc.with_ymd_and_hms(2026, 4, 7, 3, 39, 25).unwrap();
         let session = ChatSession {
             session_id: "session-1".to_string(),
@@ -460,61 +451,17 @@ Second message
 
         assert_eq!(
             session_markdown_filename(&session, "mock"),
-            "2026-04-07_03-39-25Z-mock-same-title.md"
+            "2026-04-07_03-39-25Z-mock-session-1-same-title.md"
         );
     }
 
-    #[tokio::test]
-    async fn resolve_session_markdown_path_uses_hash_only_for_real_filename_collision() {
-        let temp_dir = TempDir::new().unwrap();
-        let history_dir = temp_dir.path().join(".waylog").join("history");
-        tokio::fs::create_dir_all(&history_dir).await.unwrap();
-
-        let started_at = Utc.with_ymd_and_hms(2026, 4, 7, 3, 39, 25).unwrap();
-        let first = ChatSession {
-            session_id: "session-1".to_string(),
-            provider: "mock".to_string(),
-            project_path: PathBuf::from("/project"),
-            started_at,
-            updated_at: started_at,
-            messages: vec![ChatMessage {
-                id: "msg-1".to_string(),
-                timestamp: started_at,
-                role: MessageRole::User,
-                content: "Same title".to_string(),
-                metadata: MessageMetadata::default(),
-            }],
-        };
-        let mut second = first.clone();
-        second.session_id = "session-2".to_string();
-
-        let legacy_path = history_dir.join(session_markdown_filename(&first, "mock"));
-        assert_eq!(
-            resolve_session_markdown_path(&history_dir, &first, "mock")
-                .await
-                .unwrap(),
-            legacy_path
-        );
-
-        exporter::create_markdown_file(&legacy_path, &first)
-            .await
-            .unwrap();
+    #[test]
+    fn session_id_filename_component_is_safe_and_not_truncated() {
+        let session_id = "rollout-2026-07-20T11:41:43-019f7d9d-8583-7260-b494-56fb96900012";
 
         assert_eq!(
-            resolve_session_markdown_path(&history_dir, &first, "mock")
-                .await
-                .unwrap(),
-            legacy_path
+            session_id_filename_component(session_id),
+            "rollout-2026-07-20T11%3A41%3A43-019f7d9d-8583-7260-b494-56fb96900012"
         );
-
-        let collision_path = resolve_session_markdown_path(&history_dir, &second, "mock")
-            .await
-            .unwrap();
-        assert_ne!(collision_path, legacy_path);
-        assert!(collision_path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with("2026-04-07_03-39-25Z-mock-same-title-"));
     }
 }

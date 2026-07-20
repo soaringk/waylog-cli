@@ -36,6 +36,13 @@ impl Provider for ClaudeProvider {
         Ok(candidates.into_iter().next())
     }
 
+    async fn find_session(&self, project_path: &Path, session_id: &str) -> Result<Option<PathBuf>> {
+        let session_path = self
+            .session_dir(project_path)?
+            .join(format!("{session_id}.jsonl"));
+        Ok(session_path.exists().then_some(session_path))
+    }
+
     async fn get_all_sessions(&self, project_path: &Path) -> Result<Vec<PathBuf>> {
         let session_dir = self.session_dir(project_path)?;
 
@@ -363,7 +370,6 @@ struct ClaudeUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::base::{MessageRole, Provider};
 
     // Helper to create a user message event with content
     fn create_user_event(content: &str) -> ClaudeEvent {
