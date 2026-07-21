@@ -9,11 +9,16 @@ WayLog is a local-first Rust CLI that turns coding-agent histories into readable
 - `waylog run` launches one agent and keeps its latest session synchronized while the process is active.
 - `waylog pull` recovers sessions associated with the current project.
 - `waylog pull --recursive` treats the visible current directory tree as one workspace recovery scope and aggregates descendant sessions into the resolved tracking root, which may be an ancestor of the invocation directory; `--hidden` expands that scope, and neither mode creates independent outputs for nested projects.
-- `waylog pull --provider <provider> --session <id>` targets one provider session for hook integration and may write to a caller-managed directory.
+- `waylog pull --provider <provider> --session <id>` targets one session in local provider history and may write to a caller-managed directory.
+- `--source` parses supplied provider artifacts or a downloaded provider directory tree without local session discovery, allowing collectors and a centralized parser to remain separate while preserving upload grouping.
 
 ## Core Boundaries
 
 - `providers::base::Provider` owns native storage discovery, project matching, session lookup, and conversion into `ChatSession`.
+- Direct source parsing bypasses discovery, treats supplied artifacts as authoritative, and still crosses the same `Provider::parse_session` seam.
+- Provider history availability is independent of the optional CLI launch command, so application-only providers participate in `pull` without pretending to support `run`.
+- Claude-family providers share JSONL parsing and main-session enumeration while keeping product-specific storage discovery behind `Provider`.
+- Qoder is project-scoped, while QoderWork is application-wide and scans its task workspaces once per pull.
 - `Synchronizer` owns provider-independent sync behavior and status reporting.
 - `SessionTracker` reconstructs sync state from Markdown frontmatter, avoiding a second state store.
 - `exporter::markdown` owns the Markdown and frontmatter representation.

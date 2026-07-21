@@ -58,11 +58,26 @@ pub enum Commands {
         hidden: bool,
 
         /// Pull only this provider session ID
-        #[arg(long, requires = "provider", conflicts_with = "recursive")]
+        #[arg(
+            long,
+            requires = "provider",
+            conflicts_with = "recursive",
+            group = "target"
+        )]
         session: Option<String>,
 
+        /// Parse a supported provider session file or directory tree
+        #[arg(
+            long,
+            value_name = "PATH",
+            requires = "provider",
+            conflicts_with = "recursive",
+            group = "target"
+        )]
+        source: Option<std::path::PathBuf>,
+
         /// Write Markdown files directly to this directory
-        #[arg(long, value_name = "DIR", requires = "session")]
+        #[arg(long, value_name = "DIR", requires = "target")]
         output_dir: Option<std::path::PathBuf>,
     },
 }
@@ -89,5 +104,20 @@ mod tests {
             "/tmp/out",
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn source_conflicts_with_session_lookup() {
+        assert!(Cli::try_parse_from([
+            "waylog",
+            "pull",
+            "--provider",
+            "opencode",
+            "--session",
+            "ses_test",
+            "--source",
+            "/tmp/raw",
+        ])
+        .is_err());
     }
 }

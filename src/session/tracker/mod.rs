@@ -24,15 +24,10 @@ impl SessionTracker {
         history_dir: PathBuf,
         provider: Arc<dyn Provider>,
     ) -> Result<Self> {
-        // Start with empty state (stateless design)
-        let state = ProjectState {
-            sessions: std::collections::HashMap::new(),
-        };
-
         let tracker = Self {
             history_dir,
             provider,
-            state: Arc::new(Mutex::new(state)),
+            state: Arc::new(Mutex::new(ProjectState::default())),
         };
 
         // Restore state from existing markdown files
@@ -46,15 +41,9 @@ impl SessionTracker {
         Ok(tracker)
     }
 
-    /// Get the current sync state
-    pub async fn get_state(&self) -> ProjectState {
-        self.state.lock().await.clone()
-    }
-
-    /// Save the current state to disk
-    pub async fn save_state(&self) -> Result<()> {
-        // Persistence disabled: Markdown files are the source of truth
-        Ok(())
+    /// Get one session's sync state.
+    pub async fn get_session(&self, session_id: &str) -> Option<SessionState> {
+        self.state.lock().await.get_session(session_id).cloned()
     }
 
     /// Get the number of synced messages for a session
@@ -154,14 +143,6 @@ mod tests {
             &self.name
         }
 
-        fn data_dir(&self) -> Result<PathBuf> {
-            Ok(std::env::temp_dir())
-        }
-
-        fn session_dir(&self, _project_path: &Path) -> Result<PathBuf> {
-            Ok(std::env::temp_dir().join("sessions"))
-        }
-
         async fn find_latest_session(&self, _project_path: &Path) -> Result<Option<PathBuf>> {
             Ok(None)
         }
@@ -179,12 +160,8 @@ mod tests {
             Ok(self.sessions.keys().cloned().collect())
         }
 
-        fn is_installed(&self) -> bool {
+        fn has_history(&self) -> bool {
             true
-        }
-
-        fn command(&self) -> &str {
-            "mock"
         }
     }
 
@@ -225,104 +202,7 @@ mod tests {
             .await
             .unwrap();
 
-        let state = tracker.get_state().await;
-        assert_eq!(state.sessions.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_new_tracker_restore_from_disk() {
-        let temp_dir = TempDir::new().unwrap();
-        let project_dir = temp_dir.path().join("project");
-        tokio::fs::create_dir_all(&project_dir).await.unwrap();
-
-        // Create .waylog/history directory (where markdown files are stored)
-        let history_dir = crate::utils::path::get_waylog_dir(&project_dir);
-        tokio::fs::create_dir_all(&history_dir).await.unwrap();
-
-        // Create a markdown file with frontmatter
-        let markdown_file = history_dir.join("session-123.md");
-        let content = r#"---
-provider: test
-session_id: session-123
-message_count: 5
----
-# Session Content
-"#;
-        tokio::fs::write(&markdown_file, content).await.unwrap();
-
-        let mock_provider = MockProvider::new("test");
-        let provider = Arc::new(mock_provider);
-
-        let tracker = SessionTracker::new(project_dir, provider).await.unwrap();
-
-        let state = tracker.get_state().await;
-        assert_eq!(state.sessions.len(), 1);
-        assert!(state.sessions.contains_key("session-123"));
-
-        let session_state = state.sessions.get("session-123").unwrap();
-        assert_eq!(session_state.session_id, "session-123");
-        assert_eq!(session_state.synced_message_count, 5);
-        assert_eq!(session_state.markdown_path, markdown_file);
-    }
-
-    #[tokio::test]
-    async fn test_get_synced_count() {
-        let temp_dir = TempDir::new().unwrap();
-        let mock_provider = MockProvider::new("test");
-        let provider = Arc::new(mock_provider);
-
-        let tracker = SessionTracker::new(temp_dir.path().to_path_buf(), provider)
-            .await
-            .unwrap();
-
-        // Initially no synced messages
-        assert_eq!(tracker.get_synced_count("session-1").await, 0);
-
-        // Update session
-        tracker
-            .update_session(
-                "session-1".to_string(),
-                temp_dir.path().join("session-1.json"),
-                temp_dir.path().join("session-1.md"),
-                10,
-            )
-            .await
-            .unwrap();
-
-        // Should return synced count
-        assert_eq!(tracker.get_synced_count("session-1").await, 10);
-    }
-
-    #[tokio::test]
-    async fn test_get_markdown_path() {
-        let temp_dir = TempDir::new().unwrap();
-        let mock_provider = MockProvider::new("test");
-        let provider = Arc::new(mock_provider);
-
-        let tracker = SessionTracker::new(temp_dir.path().to_path_buf(), provider)
-            .await
-            .unwrap();
-
-        // Initially no markdown path
-        assert_eq!(tracker.get_markdown_path("session-1").await, None);
-
-        // Update session
-        let markdown_path = temp_dir.path().join("session-1.md");
-        tracker
-            .update_session(
-                "session-1".to_string(),
-                temp_dir.path().join("session-1.json"),
-                markdown_path.clone(),
-                5,
-            )
-            .await
-            .unwrap();
-
-        // Should return markdown path
-        assert_eq!(
-            tracker.get_markdown_path("session-1").await,
-            Some(markdown_path)
-        );
+        assert!(tracker.get_session("missing").await.is_none());
     }
 
     #[tokio::test]
@@ -350,8 +230,7 @@ message_count: 5
             .await
             .unwrap();
 
-        let state = tracker.get_state().await;
-        let session_state = state.sessions.get(&session_id).unwrap();
+        let session_state = tracker.get_session(&session_id).await.unwrap();
 
         assert_eq!(session_state.session_id, session_id);
         assert_eq!(session_state.provider, "test");
@@ -394,37 +273,12 @@ message_count: 5
             .await
             .unwrap();
 
-        let state = tracker.get_state().await;
-        assert_eq!(state.sessions.len(), 1);
-
-        let session_state = state.sessions.get(&session_id).unwrap();
+        let session_state = tracker.get_session(&session_id).await.unwrap();
         assert_eq!(session_state.synced_message_count, 10);
         assert_eq!(
             session_state.markdown_path,
             temp_dir.path().join("session-1-v2.md")
         );
-    }
-
-    #[tokio::test]
-    async fn test_get_new_messages_no_existing_sync() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut mock_provider = MockProvider::new("test");
-
-        let session_file = temp_dir.path().join("session.json");
-        let session = create_test_session("session-1", 5);
-        mock_provider.add_session(session_file.clone(), session.clone());
-
-        let provider = Arc::new(mock_provider);
-        let tracker = SessionTracker::new(temp_dir.path().to_path_buf(), provider)
-            .await
-            .unwrap();
-
-        let (parsed_session, new_messages) = tracker.get_new_messages(&session_file).await.unwrap();
-
-        assert_eq!(parsed_session.session_id, "session-1");
-        assert_eq!(new_messages.len(), 5); // All messages are new
-        assert_eq!(new_messages[0].id, "msg-0");
-        assert_eq!(new_messages[4].id, "msg-4");
     }
 
     #[tokio::test]
@@ -539,44 +393,23 @@ message_count: 7
 
         let tracker = SessionTracker::new(project_dir, provider).await.unwrap();
 
-        let state = tracker.get_state().await;
-        assert_eq!(state.sessions.len(), 2);
-        assert!(state.sessions.contains_key("session-1"));
-        assert!(state.sessions.contains_key("session-2"));
-
         assert_eq!(
-            state
-                .sessions
-                .get("session-1")
+            tracker
+                .get_session("session-1")
+                .await
                 .unwrap()
                 .synced_message_count,
             3
         );
         assert_eq!(
-            state
-                .sessions
-                .get("session-2")
+            tracker
+                .get_session("session-2")
+                .await
                 .unwrap()
                 .synced_message_count,
             7
         );
-    }
-
-    #[tokio::test]
-    async fn test_restore_from_disk_no_waylog_dir() {
-        let temp_dir = TempDir::new().unwrap();
-        let project_dir = temp_dir.path().join("project");
-        tokio::fs::create_dir_all(&project_dir).await.unwrap();
-
-        // Don't create .waylog directory
-
-        let mock_provider = MockProvider::new("test");
-        let provider = Arc::new(mock_provider);
-
-        let tracker = SessionTracker::new(project_dir, provider).await.unwrap();
-
-        let state = tracker.get_state().await;
-        assert_eq!(state.sessions.len(), 0);
+        assert!(tracker.get_session("no-frontmatter").await.is_none());
     }
 
     #[tokio::test]
@@ -605,55 +438,8 @@ message_count: 5
 
         let tracker = SessionTracker::new(project_dir, provider).await.unwrap();
 
-        let state = tracker.get_state().await;
-        assert_eq!(state.sessions.len(), 1);
-
-        let session_state = state.sessions.get("session-1").unwrap();
+        let session_state = tracker.get_session("session-1").await.unwrap();
         // Should fallback to provider name
         assert_eq!(session_state.provider, "test-provider");
-    }
-
-    #[tokio::test]
-    async fn test_save_state() {
-        let temp_dir = TempDir::new().unwrap();
-        let mock_provider = MockProvider::new("test");
-        let provider = Arc::new(mock_provider);
-
-        let tracker = SessionTracker::new(temp_dir.path().to_path_buf(), provider)
-            .await
-            .unwrap();
-
-        // save_state is currently a no-op, should always succeed
-        let result = tracker.save_state().await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_get_state() {
-        let temp_dir = TempDir::new().unwrap();
-        let mock_provider = MockProvider::new("test");
-        let provider = Arc::new(mock_provider);
-
-        let tracker = SessionTracker::new(temp_dir.path().to_path_buf(), provider)
-            .await
-            .unwrap();
-
-        let state1 = tracker.get_state().await;
-        assert_eq!(state1.sessions.len(), 0);
-
-        // Update state
-        tracker
-            .update_session(
-                "session-1".to_string(),
-                temp_dir.path().join("session-1.json"),
-                temp_dir.path().join("session-1.md"),
-                5,
-            )
-            .await
-            .unwrap();
-
-        let state2 = tracker.get_state().await;
-        assert_eq!(state2.sessions.len(), 1);
-        assert!(state2.sessions.contains_key("session-1"));
     }
 }

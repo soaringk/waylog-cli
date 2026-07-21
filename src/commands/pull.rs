@@ -16,6 +16,7 @@ pub struct PullOptions {
     pub recursive: bool,
     pub include_hidden: bool,
     pub session_id: Option<String>,
+    pub source: Option<PathBuf>,
     pub output_dir: Option<PathBuf>,
     pub verbose: bool,
 }
@@ -32,22 +33,10 @@ pub async fn handle_pull(
         recursive,
         include_hidden,
         session_id,
+        source,
         output_dir,
         verbose,
     } = options;
-    // 1. Validate provider first (before any other operations)
-    // This ensures we catch invalid providers even if project is not initialized
-    if let Some(ref name) = provider_name {
-        match providers::get_provider(name) {
-            Ok(_) => {} // Provider is valid, continue
-            Err(WaylogError::ProviderNotFound(ref invalid_name)) => {
-                output.unknown_provider(invalid_name)?;
-                return Err(WaylogError::ProviderNotFound(name.clone()));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
     output.pull_start(&target_project_path, recursive, include_hidden)?;
 
     let project_paths = if recursive {
@@ -73,8 +62,8 @@ pub async fn handle_pull(
     let mut total_failed = 0;
 
     for provider in providers_to_sync {
-        if !provider_was_selected && !provider.is_installed() {
-            debug!("Skipping {} (not installed)", provider.name());
+        if !provider_was_selected && !provider.has_history() {
+            debug!("Skipping {} (no local history)", provider.name());
             continue;
         }
 
@@ -95,7 +84,9 @@ pub async fn handle_pull(
             tracker.clone(),
         );
 
-        let session_paths = if let Some(session_id) = &session_id {
+        let session_paths = if let Some(source) = &source {
+            collect_source_paths(source)?
+        } else if let Some(session_id) = &session_id {
             let session_path = provider
                 .find_session(&target_project_path, session_id)
                 .await?
@@ -108,7 +99,9 @@ pub async fn handle_pull(
             collect_session_paths(provider.clone(), &project_paths).await?
         };
 
-        let results = synchronizer.sync_paths(session_paths, force).await?;
+        let results = synchronizer
+            .sync_paths(session_paths, force || source.is_some())
+            .await?;
         total_tasks += results.len();
 
         // Print section header
@@ -149,9 +142,6 @@ pub async fn handle_pull(
 
         total_synced += provider_synced;
         total_uptodate += provider_uptodate;
-
-        // Save state after each provider
-        tracker.save_state().await?;
     }
 
     if all_tasks_failed(total_tasks, total_failed) {
@@ -165,6 +155,35 @@ pub async fn handle_pull(
 
 fn all_tasks_failed(total: usize, failed: usize) -> bool {
     total > 0 && failed == total
+}
+
+fn collect_source_paths(source: &Path) -> Result<Vec<PathBuf>> {
+    if source.is_file() {
+        return Ok(vec![source.to_path_buf()]);
+    }
+    if !source.is_dir() {
+        return Err(WaylogError::PathError(format!(
+            "Session source not found: {}",
+            source.display()
+        )));
+    }
+
+    let mut paths = Vec::new();
+    for entry in WalkDir::new(source).follow_links(false) {
+        let entry = entry.map_err(|error| WaylogError::PathError(error.to_string()))?;
+        if entry.file_type().is_file() {
+            paths.push(entry.into_path());
+        }
+    }
+    paths.sort();
+
+    if paths.is_empty() {
+        return Err(WaylogError::PathError(format!(
+            "Session source contains no files: {}",
+            source.display()
+        )));
+    }
+    Ok(paths)
 }
 
 fn collect_project_paths(root: &Path, include_hidden: bool) -> Vec<PathBuf> {
@@ -212,6 +231,13 @@ async fn collect_session_paths(
     provider: Arc<dyn Provider>,
     project_paths: &[PathBuf],
 ) -> Result<Vec<PathBuf>> {
+    if !provider.is_project_scoped() {
+        return match project_paths.first() {
+            Some(project_path) => provider.get_all_sessions(project_path).await,
+            None => Ok(Vec::new()),
+        };
+    }
+
     let mut session_paths = Vec::new();
     let mut seen = HashSet::new();
 
@@ -236,11 +262,14 @@ mod tests {
     use chrono::Utc;
     use std::collections::HashMap;
     use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
     struct MockProvider {
         sessions_by_project: HashMap<PathBuf, Vec<PathBuf>>,
-        installed: bool,
+        history_available: bool,
+        project_scoped: bool,
+        get_all_calls: AtomicUsize,
     }
 
     #[async_trait]
@@ -249,12 +278,8 @@ mod tests {
             "mock"
         }
 
-        fn data_dir(&self) -> Result<PathBuf> {
-            Ok(std::env::temp_dir())
-        }
-
-        fn session_dir(&self, _project_path: &Path) -> Result<PathBuf> {
-            Ok(std::env::temp_dir())
+        fn is_project_scoped(&self) -> bool {
+            self.project_scoped
         }
 
         async fn find_latest_session(&self, _project_path: &Path) -> Result<Option<PathBuf>> {
@@ -279,6 +304,7 @@ mod tests {
         }
 
         async fn get_all_sessions(&self, project_path: &Path) -> Result<Vec<PathBuf>> {
+            self.get_all_calls.fetch_add(1, Ordering::Relaxed);
             Ok(self
                 .sessions_by_project
                 .get(project_path)
@@ -286,12 +312,8 @@ mod tests {
                 .unwrap_or_default())
         }
 
-        fn is_installed(&self) -> bool {
-            self.installed
-        }
-
-        fn command(&self) -> &str {
-            "mock"
+        fn has_history(&self) -> bool {
+            self.history_available
         }
     }
 
@@ -362,14 +384,38 @@ mod tests {
                 (project_a.clone(), vec![shared.clone(), unique.clone()]),
                 (project_b.clone(), vec![shared.clone()]),
             ]),
-            installed: true,
+            history_available: true,
+            project_scoped: true,
+            get_all_calls: AtomicUsize::new(0),
         });
 
-        let sessions = collect_session_paths(provider, &[project_a, project_b])
+        let sessions = collect_session_paths(provider.clone(), &[project_a, project_b])
             .await
             .unwrap();
 
         assert_eq!(sessions, vec![shared, unique]);
+        assert_eq!(provider.get_all_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn collect_session_paths_scans_global_provider_once() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_a = temp_dir.path().join("a");
+        let project_b = temp_dir.path().join("b");
+        let session = temp_dir.path().join("global.jsonl");
+        let provider = Arc::new(MockProvider {
+            sessions_by_project: HashMap::from([(project_a.clone(), vec![session.clone()])]),
+            history_available: true,
+            project_scoped: false,
+            get_all_calls: AtomicUsize::new(0),
+        });
+
+        let sessions = collect_session_paths(provider.clone(), &[project_a, project_b])
+            .await
+            .unwrap();
+
+        assert_eq!(sessions, vec![session]);
+        assert_eq!(provider.get_all_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]

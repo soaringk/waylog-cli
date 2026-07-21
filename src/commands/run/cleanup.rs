@@ -11,7 +11,6 @@ use tracing;
 /// This function handles:
 /// - Stopping the file watcher
 /// - Performing final sync of chat messages
-/// - Saving session state
 ///
 /// Errors during cleanup are logged but don't prevent the function from completing.
 pub(crate) async fn cleanup_and_sync(
@@ -64,11 +63,6 @@ pub(crate) async fn cleanup_and_sync(
                 }
             }
         }
-    }
-
-    // Save final state - errors are logged but don't stop cleanup
-    if let Err(e) = tracker.save_state().await {
-        tracing::warn!("Failed to save state: {}", e);
     }
 
     Ok(())

@@ -5,7 +5,7 @@
 
 **无缝同步、保留并本地化版本控制你的 AI 编程对话历史。**
 
-WayLog CLI 是一个轻量级的工具，自动捕捉并存档你的 AI 编程会话（Antigravity、Claude Code、Gemini CLI、OpenAI Codex CLI、OpenCode），将其导出为整洁、可搜索的本地 Markdown 文件。不要再因为会话过期而丢失上下文——WayLog CLI 帮你实现 AI 历史的本地所有权。
+WayLog CLI 是一个轻量级的工具，自动捕捉并存档受支持的 AI 编程会话，将其导出为整洁、可搜索的本地 Markdown 文件。不要再因为会话过期而丢失上下文——WayLog CLI 帮你实现 AI 历史的本地所有权。
 
 [English](README.md) | [中文文档](README_zh.md)
 
@@ -32,7 +32,7 @@ curl -fsSL https://raw.githubusercontent.com/soaringk/waylog-cli/main/scripts/in
 irm https://raw.githubusercontent.com/soaringk/waylog-cli/main/scripts/install.ps1 | iex
 ```
 
-安装脚本会根据 macOS、Linux、Windows 以及 x64、ARM64 架构选择对应的 GitHub Release 预编译文件，并校验 SHA-256。运行前可设置 `WAYLOG_VERSION`（例如 `0.3.0`）固定版本；默认安装最新版本。
+安装脚本会根据 macOS、Linux、Windows 以及 x64、ARM64 架构选择对应的 GitHub Release 预编译文件，并校验 SHA-256。运行前可设置 `WAYLOG_VERSION`（例如 `0.3.1`）固定版本；默认安装最新版本。
 
 ## 💡 使用方法
 
@@ -41,7 +41,7 @@ irm https://raw.githubusercontent.com/soaringk/waylog-cli/main/scripts/install.p
 使用 `waylog run` 代替直接调用 AI 工具。WayLog 会启动代理并持续同步它的对话历史。
 
 ```bash
-# 可将 claude 替换为下方列出的任一供应商
+# 可将 claude 替换为其他 CLI provider；Qoder 和 QoderWork 仅支持 pull
 waylog run claude
 ```
 
@@ -58,9 +58,14 @@ waylog pull
 # 将当前工作区及其子项目聚合到同一份历史中
 waylog pull --recursive
 
-# 只拉取一个 session，并输出到指定目录（适合 hook 调用）
+# 只拉取一个本地 session，并输出到指定目录
 waylog pull --provider opencode --session <session-id> --output-dir <目录>
+
+# 直接解析单个原始记录或下载后的 provider 目录，不搜索本机历史目录
+waylog pull --provider codex --source <conversation/codex> --output-dir <目录>
 ```
+
+source 目录可以包含贡献者子目录。每个下载后的 provider 目录执行一次；传入的原始记录是权威输入，会重新生成对应 Markdown。
 
 ![WayLog Pull Demo](demo/pull.gif)
 
@@ -72,7 +77,11 @@ waylog pull --provider opencode --session <session-id> --output-dir <目录>
 | **Claude Code** | 🚧 Beta | 支持 Anthropic 的 `claude` 命令行工具。 |
 | **Gemini CLI** | 🚧 Beta | 支持 Google 的 Gemini 命令行工具。 |
 | **Codex** | 🚧 Beta | 支持 OpenAI Codex CLI。 |
-| **OpenCode** | 🚧 Beta | 从 OpenCode 的本地 SQLite 数据库读取会话。 |
+| **OpenCode** | 🚧 Beta | 读取本地 SQLite 会话和官方 JSON 会话导出。 |
+| **Qoder** | 🚧 Beta | 仅支持 pull；从 `~/.qoder/projects/` 读取当前项目的 Qoder IDE 会话。 |
+| **QoderWork** | 🚧 Beta | 仅支持 pull；从 `~/.qoderwork/projects/` 读取应用内全部 QoderWork 任务。 |
+
+Qoder 按当前项目查找会话。QoderWork 任务通常没有工作目录，因此 `waylog pull --provider qoderwork` 会把全部 QoderWork 会话汇总到当前 WayLog 历史目录。
 
 ### 开发构建
 

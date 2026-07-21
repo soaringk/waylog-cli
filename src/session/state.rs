@@ -25,7 +25,7 @@ pub struct SessionState {
 }
 
 /// Global state for all sessions in a project
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct ProjectState {
     /// Map of session_id -> SessionState
     pub sessions: HashMap<String, SessionState>,

@@ -3,10 +3,11 @@
 ## Stable Constraints
 
 - Never mutate provider-owned history; database-backed providers must use read-only connections.
-- Session discovery and targeted lookup must remain scoped to the requested project.
+- Project-scoped providers must limit discovery to the requested project; application-wide providers must declare global scope and be scanned once per pull.
 - `--recursive` broadens lookup to descendant projects but keeps one resolved tracking root so workspace recovery produces one coherent history.
 - Markdown frontmatter is the persisted sync state, and filenames include the provider session ID to preserve identity outside the local history tree.
 - Session parsing failures make a batch pull fail only when every attempted session fails; a one-session pull reflects that session's result.
+- `--source` bypasses local session discovery, recursively scans regular files below the supplied provider directory, fails when it finds none, and rebuilds supplied sessions even when their message count is unchanged.
 
 ## Compatibility
 

@@ -76,6 +76,7 @@ async fn main() {
                 recursive,
                 hidden,
                 session,
+                source,
                 output_dir,
             } => {
                 handle_pull(
@@ -85,6 +86,7 @@ async fn main() {
                         recursive,
                         include_hidden: hidden,
                         session_id: session,
+                        source,
                         output_dir,
                         verbose: cli.verbose,
                     },

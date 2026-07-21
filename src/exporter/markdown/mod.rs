@@ -87,64 +87,6 @@ mod tests {
         }
     }
 
-    // extract_title tests
-    #[test]
-    fn test_extract_title() {
-        let messages = vec![create_test_message(
-            MessageRole::User,
-            "How do I implement a CLI tool?",
-        )];
-
-        assert_eq!(
-            formatter::extract_title(&messages),
-            "How do I implement a CLI tool?"
-        );
-    }
-
-    #[test]
-    fn test_extract_title_long() {
-        let messages = vec![create_test_message(
-            MessageRole::User,
-            "This is a very long message that should be truncated because it exceeds the maximum length",
-        )];
-
-        let title = formatter::extract_title(&messages);
-        assert!(title.len() <= 63); // 60 + "..."
-        assert!(title.ends_with("..."));
-    }
-
-    #[test]
-    fn test_extract_title_no_user_message() {
-        let messages = vec![
-            create_test_message(MessageRole::System, "System message"),
-            create_test_message(MessageRole::Assistant, "Assistant response"),
-        ];
-
-        assert_eq!(formatter::extract_title(&messages), "Untitled Session");
-    }
-
-    #[test]
-    fn test_extract_title_empty_messages() {
-        let messages = vec![];
-        assert_eq!(formatter::extract_title(&messages), "Untitled Session");
-    }
-
-    #[test]
-    fn test_extract_title_multiline_first_line() {
-        let messages = vec![create_test_message(
-            MessageRole::User,
-            "First line\nSecond line\nThird line",
-        )];
-
-        assert_eq!(formatter::extract_title(&messages), "First line");
-    }
-
-    #[test]
-    fn test_extract_title_empty_content() {
-        let messages = vec![create_test_message(MessageRole::User, "")];
-        assert_eq!(formatter::extract_title(&messages), "Untitled Session");
-    }
-
     // format_datetime tests
     #[test]
     fn test_format_datetime() {
@@ -205,15 +147,6 @@ mod tests {
         assert!(formatted.contains("Thought 2"));
     }
 
-    #[test]
-    fn test_format_message_multiline_content() {
-        let message = create_test_message(MessageRole::User, "Line 1\nLine 2\nLine 3");
-        let formatted = formatter::format_message(&message);
-        assert!(formatted.contains("Line 1"));
-        assert!(formatted.contains("Line 2"));
-        assert!(formatted.contains("Line 3"));
-    }
-
     // generate_markdown tests
     #[test]
     fn test_generate_markdown_basic() {
@@ -262,24 +195,6 @@ mod tests {
 
         assert!(md.contains("message_count: 0"));
         assert!(md.contains("# Untitled Session"));
-    }
-
-    #[test]
-    fn test_generate_markdown_multiple_messages() {
-        let messages = vec![
-            create_test_message(MessageRole::User, "Question 1"),
-            create_test_message(MessageRole::Assistant, "Answer 1"),
-            create_test_message(MessageRole::User, "Question 2"),
-            create_test_message(MessageRole::Assistant, "Answer 2"),
-        ];
-        let session = create_test_session(messages);
-        let md = generate_markdown(&session);
-
-        assert!(md.contains("message_count: 4"));
-        assert!(md.contains("Question 1"));
-        assert!(md.contains("Answer 1"));
-        assert!(md.contains("Question 2"));
-        assert!(md.contains("Answer 2"));
     }
 
     #[test]

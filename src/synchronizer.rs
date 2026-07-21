@@ -94,10 +94,9 @@ impl Synchronizer {
         }
 
         // 2. Check state
-        let state = self.tracker.get_state().await;
         let (markdown_path, mut synced_count) =
-            if let Some(s) = state.get_session(&session.session_id) {
-                (s.markdown_path.clone(), s.synced_message_count)
+            if let Some(state) = self.tracker.get_session(&session.session_id).await {
+                (state.markdown_path, state.synced_message_count)
             } else {
                 (
                     self.history_dir
@@ -240,14 +239,6 @@ mod tests {
             "mock"
         }
 
-        fn data_dir(&self) -> Result<PathBuf> {
-            Ok(std::env::temp_dir())
-        }
-
-        fn session_dir(&self, _project_path: &Path) -> Result<PathBuf> {
-            Ok(std::env::temp_dir())
-        }
-
         async fn find_latest_session(&self, _project_path: &Path) -> Result<Option<PathBuf>> {
             Ok(Some(self.session_path.clone()))
         }
@@ -265,12 +256,8 @@ mod tests {
             Ok(vec![self.session_path.clone()])
         }
 
-        fn is_installed(&self) -> bool {
+        fn has_history(&self) -> bool {
             true
-        }
-
-        fn command(&self) -> &str {
-            "mock"
         }
     }
 

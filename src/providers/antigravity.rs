@@ -24,13 +24,6 @@ impl AntigravityProvider {
             data_dir: Some(data_dir),
         }
     }
-}
-
-#[async_trait]
-impl Provider for AntigravityProvider {
-    fn name(&self) -> &str {
-        "antigravity"
-    }
 
     fn data_dir(&self) -> Result<PathBuf> {
         Ok(self
@@ -38,14 +31,12 @@ impl Provider for AntigravityProvider {
             .clone()
             .unwrap_or(path::home_dir()?.join(".gemini").join("antigravity-cli")))
     }
+}
 
-    fn session_dir(&self, _project_path: &Path) -> Result<PathBuf> {
-        Ok(self.data_dir()?.join("brain"))
-    }
-
-    async fn find_latest_session(&self, project_path: &Path) -> Result<Option<PathBuf>> {
-        let candidates = self.get_all_sessions(project_path).await?;
-        Ok(candidates.into_iter().next())
+#[async_trait]
+impl Provider for AntigravityProvider {
+    fn name(&self) -> &str {
+        "antigravity"
     }
 
     async fn get_all_sessions(&self, project_path: &Path) -> Result<Vec<PathBuf>> {
@@ -131,12 +122,12 @@ impl Provider for AntigravityProvider {
         })
     }
 
-    fn is_installed(&self) -> bool {
+    fn has_history(&self) -> bool {
         self.data_dir().map(|d| d.exists()).unwrap_or(false)
     }
 
-    fn command(&self) -> &str {
-        "antigravity-cli"
+    fn run_command(&self) -> Option<&str> {
+        Some("antigravity-cli")
     }
 }
 

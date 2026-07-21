@@ -54,20 +54,25 @@ pub struct ChatSession {
     pub messages: Vec<ChatMessage>,
 }
 
-/// Provider trait - each AI CLI tool implements this
+/// Converts one provider's discovered or supplied history into chat sessions.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Get the provider name (e.g., "codex", "claude", "gemini")
     fn name(&self) -> &str;
 
-    /// Get the data directory for this provider
-    fn data_dir(&self) -> Result<PathBuf>;
-
-    /// Get the session directory for a specific project
-    fn session_dir(&self, project_path: &Path) -> Result<PathBuf>;
+    /// Whether session discovery is limited to a project path.
+    fn is_project_scoped(&self) -> bool {
+        true
+    }
 
     /// Find the latest session file for the current project
-    async fn find_latest_session(&self, project_path: &Path) -> Result<Option<PathBuf>>;
+    async fn find_latest_session(&self, project_path: &Path) -> Result<Option<PathBuf>> {
+        Ok(self
+            .get_all_sessions(project_path)
+            .await?
+            .into_iter()
+            .next())
+    }
 
     /// Find one session by its provider session ID.
     async fn find_session(&self, project_path: &Path, session_id: &str) -> Result<Option<PathBuf>> {
@@ -86,9 +91,11 @@ pub trait Provider: Send + Sync {
     /// Get all session files for a specific project
     async fn get_all_sessions(&self, project_path: &Path) -> Result<Vec<PathBuf>>;
 
-    /// Check if the CLI tool is installed
-    fn is_installed(&self) -> bool;
+    /// Check whether provider history is available.
+    fn has_history(&self) -> bool;
 
-    /// Get the command to run the CLI tool
-    fn command(&self) -> &str;
+    /// Get the CLI command when this provider can be launched by `waylog run`.
+    fn run_command(&self) -> Option<&str> {
+        None
+    }
 }

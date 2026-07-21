@@ -14,26 +14,16 @@ impl CodexProvider {
     pub fn new() -> Self {
         Self
     }
+
+    fn data_dir(&self) -> Result<PathBuf> {
+        Ok(path::home_dir()?.join(".codex").join("sessions"))
+    }
 }
 
 #[async_trait]
 impl Provider for CodexProvider {
     fn name(&self) -> &str {
         "codex"
-    }
-
-    fn data_dir(&self) -> Result<PathBuf> {
-        Ok(path::home_dir()?.join(".codex").join("sessions"))
-    }
-
-    fn session_dir(&self, _project_path: &Path) -> Result<PathBuf> {
-        // Codex organizes by date: ~/.codex/sessions/YYYY/MM/DD/
-        let now = Utc::now();
-        Ok(self
-            .data_dir()?
-            .join(now.format("%Y").to_string())
-            .join(now.format("%m").to_string())
-            .join(now.format("%d").to_string()))
     }
 
     async fn find_latest_session(&self, project_path: &Path) -> Result<Option<PathBuf>> {
@@ -158,7 +148,11 @@ impl Provider for CodexProvider {
         let mut lines = reader.lines();
 
         let mut messages = Vec::new();
-        let mut session_id = String::new();
+        let mut session_id = file_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("unknown")
+            .to_string();
         let mut started_at = Utc::now();
         let mut session_project_path = PathBuf::new();
 
@@ -168,18 +162,19 @@ impl Provider for CodexProvider {
             }
 
             if let Ok(event) = serde_json::from_str::<CodexEvent>(&line) {
-                // Pick session metadata
-                if session_id.is_empty() {
-                    session_id = file_path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                }
-
                 match event.event_type.as_str() {
-                    "session_meta" | "turn_context" => {
-                        if let Some(cwd) = event.payload.as_ref().and_then(|p| p.cwd.clone()) {
+                    "session_meta" => {
+                        if let Some(payload) = event.payload {
+                            if let Some(id) = payload.id.filter(|id| !id.is_empty()) {
+                                session_id = id;
+                            }
+                            if let Some(cwd) = payload.cwd {
+                                session_project_path = PathBuf::from(cwd);
+                            }
+                        }
+                    }
+                    "turn_context" => {
+                        if let Some(cwd) = event.payload.and_then(|payload| payload.cwd) {
                             session_project_path = PathBuf::from(cwd);
                         }
                     }
@@ -218,12 +213,12 @@ impl Provider for CodexProvider {
         })
     }
 
-    fn is_installed(&self) -> bool {
-        which::which("codex").is_ok()
+    fn has_history(&self) -> bool {
+        self.data_dir().is_ok_and(|directory| directory.exists())
     }
 
-    fn command(&self) -> &str {
-        "codex"
+    fn run_command(&self) -> Option<&str> {
+        Some("codex")
     }
 }
 
@@ -237,13 +232,6 @@ impl CodexProvider {
         let reader = BufReader::new(file);
         let mut lines = reader.lines();
 
-        // Normalize target path for comparison (handle both Unix and Windows separators)
-        let target_str = target_project_path
-            .to_string_lossy()
-            .trim_end_matches('/')
-            .trim_end_matches('\\')
-            .to_string();
-
         // Scan first 50 lines (session_meta is usually first)
         let mut checked_lines = 0;
         while let Some(line) = lines.next_line().await? {
@@ -254,12 +242,7 @@ impl CodexProvider {
 
             if let Ok(event) = serde_json::from_str::<CodexEvent>(&line) {
                 if let Some(cwd_str) = event.payload.and_then(|p| p.cwd) {
-                    let session_cwd = cwd_str
-                        .trim_end_matches('/')
-                        .trim_end_matches('\\')
-                        .to_string();
-
-                    return Ok(session_cwd == target_str);
+                    return Ok(paths_equivalent(Path::new(&cwd_str), target_project_path).await);
                 }
             }
         }
@@ -329,6 +312,7 @@ struct CodexEvent {
 
 #[derive(Debug, Deserialize)]
 struct CodexPayload {
+    id: Option<String>,
     role: Option<String>,
     cwd: Option<String>,
     content: Option<Vec<CodexContent>>,
@@ -342,34 +326,76 @@ struct CodexContent {
     text: Option<String>,
 }
 
+async fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (fs::canonicalize(left).await, fs::canonicalize(right).await) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn session_meta_line(cwd: &str) -> String {
+    fn session_meta_line(session_id: &str, cwd: &Path) -> String {
         format!(
-            r#"{{"type":"session_meta","timestamp":"2026-04-01T00:00:00Z","payload":{{"cwd":"{}"}}}}"#,
-            cwd
+            r#"{{"type":"session_meta","timestamp":"2026-04-01T00:00:00Z","payload":{{"id":"{}","cwd":"{}"}}}}"#,
+            session_id,
+            cwd.display()
         )
     }
 
     #[tokio::test]
-    async fn probe_project_path_requires_exact_cwd_match() {
+    async fn parses_canonical_session_id_and_requires_same_project() {
         let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("session.jsonl");
-        tokio::fs::write(&file_path, session_meta_line("/home/cody"))
-            .await
-            .unwrap();
+        let file_path = temp_dir.path().join("rollout-with-prefix.jsonl");
+        let project_path = temp_dir.path().join("project");
+        tokio::fs::create_dir(&project_path).await.unwrap();
+        tokio::fs::write(
+            &file_path,
+            session_meta_line("canonical-session-id", &project_path),
+        )
+        .await
+        .unwrap();
 
         let provider = CodexProvider::new();
 
         assert!(provider
-            .probe_project_path(&file_path, Path::new("/home/cody"))
+            .probe_project_path(&file_path, &project_path)
             .await
             .unwrap());
         assert!(!provider
-            .probe_project_path(&file_path, Path::new("/home/cody/trade-bot"))
+            .probe_project_path(&file_path, &project_path.join("nested"))
+            .await
+            .unwrap());
+        assert_eq!(
+            provider.parse_session(&file_path).await.unwrap().session_id,
+            "canonical-session-id"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_project_path_accepts_symlink_equivalent_cwd() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = TempDir::new().unwrap();
+        let real_project = temp_dir.path().join("real-project");
+        let linked_project = temp_dir.path().join("linked-project");
+        let file_path = temp_dir.path().join("session.jsonl");
+        tokio::fs::create_dir(&real_project).await.unwrap();
+        symlink(&real_project, &linked_project).unwrap();
+        tokio::fs::write(&file_path, session_meta_line("session-id", &linked_project))
+            .await
+            .unwrap();
+
+        assert!(CodexProvider::new()
+            .probe_project_path(&file_path, &real_project)
             .await
             .unwrap());
     }

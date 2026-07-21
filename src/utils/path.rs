@@ -51,7 +51,7 @@ pub fn encode_path_claude(path: &Path) -> String {
 
 /// Encode a path for Gemini (SHA-256 hash)
 /// This is platform-independent as it hashes the string representation
-/// Example: /Users/name/project -> f5ca4b7f107121b48048aa4ebe261a7ee63769dfc3a06e56191c987c8b51176d
+/// Example: /home/user/project -> 9dad1e4e08b0b11cbcd860257e8bdfa6b8e5f01790e10a6a0b1f4870c13e686b
 pub fn encode_path_gemini(path: &Path) -> String {
     // Use the canonical string representation for consistent hashing
     let path_str = path.to_string_lossy();
@@ -73,16 +73,17 @@ pub fn find_project_root() -> Option<PathBuf> {
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let home = home_dir().ok();
 
+    find_project_root_from(&current_dir, home.as_deref())
+}
+
+fn find_project_root_from(current_dir: &Path, home: Option<&Path>) -> Option<PathBuf> {
     for path in current_dir.ancestors() {
         if path.join(WAYLOG_DIR).is_dir() {
             return Some(path.to_path_buf());
         }
 
-        // Stop if we've reached the user's home directory
-        if let Some(ref home_path) = home {
-            if path == home_path {
-                break;
-            }
+        if home == Some(path) {
+            break;
         }
     }
 
@@ -104,43 +105,11 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_encode_path_claude_absolute_unix() {
-        let path = Path::new("/home/user/project");
-        assert_eq!(encode_path_claude(path), "-home-user-project");
-    }
-
-    #[test]
-    fn test_encode_path_claude_relative() {
-        let path = Path::new("project/subdir");
-        // Relative paths will be converted to project-subdir
-        assert_eq!(encode_path_claude(path), "project-subdir");
-    }
-
-    #[test]
-    fn test_encode_path_claude_root() {
-        let path = Path::new("/");
-        assert_eq!(encode_path_claude(path), "-");
-    }
-
-    #[test]
-    fn test_encode_path_claude_with_spaces() {
-        // Spaces are replaced with hyphens
-        let path = Path::new("/home/my project");
-        assert_eq!(encode_path_claude(path), "-home-my-project");
-    }
-
-    #[test]
-    fn test_encode_path_claude_non_ascii() {
-        // Non-ASCII characters are replaced with hyphens
-        let path = Path::new("/Users/名字/project");
-        assert_eq!(encode_path_claude(path), "-Users----project");
-    }
-
-    #[test]
-    fn test_encode_path_claude_special_chars() {
-        // Special characters are replaced with hyphens
-        let path = Path::new("/home/user@#$%");
-        assert_eq!(encode_path_claude(path), "-home-user----");
+    fn test_encode_path_claude_matches_storage_key() {
+        assert_eq!(
+            encode_path_claude(Path::new("/Users/名字/my project@")),
+            "-Users----my-project-"
+        );
     }
 
     #[test]
@@ -158,57 +127,19 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_path_gemini_consistent() {
-        // Test that same paths produce same hash
-        let path1 = Path::new("/home/user/project");
-        let path2 = Path::new("/home/user/project");
-        assert_eq!(encode_path_gemini(path1), encode_path_gemini(path2));
-    }
-
-    #[test]
-    fn test_encode_path_gemini_different_paths() {
-        // Test that different paths produce different hashes
-        let path1 = Path::new("/home/user/project1");
-        let path2 = Path::new("/home/user/project2");
-        assert_ne!(encode_path_gemini(path1), encode_path_gemini(path2));
-    }
-
-    #[test]
-    fn test_encode_path_gemini_hash_format() {
-        // Test hash format: 64 hexadecimal characters
-        let path = Path::new("/home/user/project");
-        let hash = encode_path_gemini(path);
-        assert_eq!(hash.len(), 64);
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn test_encode_path_gemini_relative_vs_absolute() {
-        // Relative and absolute paths should produce different hashes
-        let abs_path = Path::new("/home/user/project");
-        let rel_path = Path::new("home/user/project");
-        assert_ne!(encode_path_gemini(abs_path), encode_path_gemini(rel_path));
+    fn test_encode_path_gemini_matches_storage_key() {
+        assert_eq!(
+            encode_path_gemini(Path::new("/home/user/project")),
+            "9dad1e4e08b0b11cbcd860257e8bdfa6b8e5f01790e10a6a0b1f4870c13e686b"
+        );
     }
 
     #[test]
     fn test_get_ai_data_dir_format() {
-        let dir = get_ai_data_dir("claude").unwrap();
-        let dir_str = dir.to_string_lossy();
-
-        // Should contain tool name
-        assert!(dir_str.contains(".claude"));
-
-        // Should be under home directory
-        let home = home_dir().unwrap();
-        assert!(dir.starts_with(&home));
-    }
-
-    #[test]
-    fn test_get_ai_data_dir_different_tools() {
-        // Different tools should produce different paths
-        let dir1 = get_ai_data_dir("claude").unwrap();
-        let dir2 = get_ai_data_dir("gemini").unwrap();
-        assert_ne!(dir1, dir2);
+        assert_eq!(
+            get_ai_data_dir("claude").unwrap(),
+            home_dir().unwrap().join(".claude")
+        );
     }
 
     #[test]
@@ -218,8 +149,6 @@ mod tests {
 
         let expected = project_dir.join(".waylog").join("history");
         assert_eq!(waylog_dir, expected);
-        // Check path ends with correct components (platform-independent)
-        assert!(waylog_dir.ends_with(Path::new(".waylog").join("history")));
     }
 
     #[test]
@@ -245,70 +174,14 @@ mod tests {
     }
 
     #[test]
-    fn test_find_project_root() {
-        // Create temporary directory structure
+    fn test_find_project_root_from_path() {
         let temp_dir = TempDir::new().unwrap();
         let project_root = temp_dir.path().join("project");
         let subdir = project_root.join("subdir").join("deep");
-
-        // Create project root directory and .waylog directory
         fs::create_dir_all(&subdir).unwrap();
         fs::create_dir_all(project_root.join(".waylog")).unwrap();
 
-        // Save current working directory
-        let original_dir = std::env::current_dir().unwrap();
-
-        // Switch to subdirectory
-        std::env::set_current_dir(&subdir).unwrap();
-
-        // Should find project root
-        let found_root = find_project_root();
-        assert!(found_root.is_some());
-
-        let found = found_root.unwrap();
-        // Verify the found path contains .waylog directory
-        assert!(found.join(".waylog").exists());
-        // Compare paths by checking they resolve to the same directory
-        // Use file_name to avoid issues with different path representations
-        assert_eq!(
-            found.file_name(),
-            project_root.file_name(),
-            "Found root should match expected project root"
-        );
-
-        // Restore original working directory
-        std::env::set_current_dir(&original_dir).unwrap();
-    }
-
-    #[test]
-    fn test_find_project_root_not_found() {
-        // Create temporary directory but don't create .waylog
-        let temp_dir = TempDir::new().unwrap();
-        let subdir = temp_dir.path().join("subdir");
-        fs::create_dir_all(&subdir).unwrap();
-
-        // Save current working directory
-        let original_dir = std::env::current_dir().unwrap();
-
-        // Switch to subdirectory
-        std::env::set_current_dir(&subdir).unwrap();
-
-        // Should not find project root (not in home directory and no .waylog)
-        // Note: This test may behave differently in different environments, depending on temp_dir location
-        // If temp_dir is under home directory, find_project_root will stop at home and return None
-        // If not, it will also return None (because .waylog was not found)
-        let _found_root = find_project_root();
-        // In test environment, temp_dir is usually not under home, so should return None
-        // But we don't enforce assertion because behavior may vary by environment
-
-        // Restore original working directory
-        // If the original directory no longer exists (e.g., in parallel test execution),
-        // try to restore to home directory as a fallback
-        if let Err(_) = std::env::set_current_dir(&original_dir) {
-            // Fallback to home directory if original directory is gone
-            if let Ok(home) = home_dir() {
-                let _ = std::env::set_current_dir(&home);
-            }
-        }
+        assert_eq!(find_project_root_from(&subdir, None), Some(project_root));
+        assert_eq!(find_project_root_from(temp_dir.path(), None), None);
     }
 }

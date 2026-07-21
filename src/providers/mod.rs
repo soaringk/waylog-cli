@@ -4,6 +4,8 @@ pub mod claude;
 pub mod codex;
 pub mod gemini;
 pub mod opencode;
+pub mod qoder;
+pub mod qoderwork;
 
 use crate::error::{Result, WaylogError};
 use std::sync::Arc;
@@ -16,11 +18,21 @@ pub fn get_provider(name: &str) -> Result<Arc<dyn base::Provider>> {
         "claude" | "claude-code" => Ok(Arc::new(claude::ClaudeProvider::new())),
         "gemini" => Ok(Arc::new(gemini::GeminiProvider::new())),
         "opencode" => Ok(Arc::new(opencode::OpenCodeProvider::new())),
+        "qoder" => Ok(Arc::new(qoder::QoderProvider::new())),
+        "qoderwork" => Ok(Arc::new(qoderwork::QoderWorkProvider::new())),
         _ => Err(WaylogError::ProviderNotFound(name.to_string())),
     }
 }
 
 /// Get a list of supported provider names
 pub fn list_providers() -> Vec<&'static str> {
-    vec!["antigravity", "claude", "gemini", "codex", "opencode"]
+    vec![
+        "antigravity",
+        "claude",
+        "gemini",
+        "codex",
+        "opencode",
+        "qoder",
+        "qoderwork",
+    ]
 }

@@ -35,16 +35,20 @@ pub async fn handle_run(
         Err(e) => return Err(e),
     };
 
-    // Check if the tool is installed
-    if !provider.is_installed() {
-        output.agent_not_installed(provider.command())?;
-        return Err(WaylogError::AgentNotInstalled(
-            provider.command().to_string(),
-        ));
+    let command = match provider.run_command() {
+        Some(command) => command.to_string(),
+        None => {
+            output.unknown_agent(&agent_name)?;
+            return Err(WaylogError::ProviderNotFound(agent_name));
+        }
+    };
+
+    if which::which(&command).is_err() {
+        output.agent_not_installed(&command)?;
+        return Err(WaylogError::AgentNotInstalled(command));
     }
 
-    // Now run_agent can focus on execution without validation
-    run_agent(args, tracking_root, target_project_path, provider).await?;
+    run_agent(args, tracking_root, target_project_path, provider, command).await?;
 
     Ok(())
 }
@@ -54,8 +58,8 @@ async fn run_agent(
     tracking_root: PathBuf,
     target_project_path: PathBuf,
     provider: Arc<dyn providers::base::Provider>,
+    command: String,
 ) -> Result<()> {
-    // Provider is already validated in handle_run, so we can focus on execution
     tracing::info!(
         "Starting {} in {}",
         provider.name(),
@@ -88,8 +92,8 @@ async fn run_agent(
     });
 
     // Start the AI CLI tool as a child process
-    tracing::info!("Launching {}...", provider.command());
-    let mut child = Command::new(provider.command())
+    tracing::info!("Launching {}...", command);
+    let mut child = Command::new(command)
         .args(&args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -340,14 +344,6 @@ mod tests {
             &self.name
         }
 
-        fn data_dir(&self) -> Result<PathBuf> {
-            Ok(std::env::temp_dir())
-        }
-
-        fn session_dir(&self, _project_path: &Path) -> Result<PathBuf> {
-            Ok(std::env::temp_dir().join("sessions"))
-        }
-
         async fn find_latest_session(&self, _project_path: &Path) -> Result<Option<PathBuf>> {
             Ok(self.latest_session.clone())
         }
@@ -365,12 +361,12 @@ mod tests {
             Ok(self.sessions.keys().cloned().collect())
         }
 
-        fn is_installed(&self) -> bool {
+        fn has_history(&self) -> bool {
             true
         }
 
-        fn command(&self) -> &str {
-            "mock"
+        fn run_command(&self) -> Option<&str> {
+            Some("mock")
         }
     }
 
@@ -529,14 +525,6 @@ mod tests {
                 "error"
             }
 
-            fn data_dir(&self) -> Result<PathBuf> {
-                Ok(std::env::temp_dir())
-            }
-
-            fn session_dir(&self, _project_path: &Path) -> Result<PathBuf> {
-                Ok(std::env::temp_dir().join("sessions"))
-            }
-
             async fn find_latest_session(&self, _project_path: &Path) -> Result<Option<PathBuf>> {
                 Err(crate::error::WaylogError::Io(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -552,12 +540,12 @@ mod tests {
                 Ok(vec![])
             }
 
-            fn is_installed(&self) -> bool {
+            fn has_history(&self) -> bool {
                 true
             }
 
-            fn command(&self) -> &str {
-                "error"
+            fn run_command(&self) -> Option<&str> {
+                Some("error")
             }
         }
 

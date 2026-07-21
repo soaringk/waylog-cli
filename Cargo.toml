@@ -1,9 +1,9 @@
 [package]
 name = "waylog"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 authors = ["WayLog Contributors"]
-description = "Automatically save chats from Claude, Codex, Gemini, and OpenCode to local Markdown files."
+description = "Save AI conversations as local Markdown files."
 license = "Apache-2.0"
 repository = "https://github.com/soaringk/waylog-cli"
 homepage = "https://github.com/soaringk/waylog-cli"
