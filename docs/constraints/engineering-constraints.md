@@ -21,4 +21,5 @@
 - Process-level CLI assertions belong in Rust integration tests so the normal platform matrix covers them.
 - CI and release build jobs are read-only; only release publishing may receive `contents: write`.
 - Keep documentation concise, intention-led, and unwrapped in source; keep chronology in worklogs.
+- Keep documentation self-contained: describe WayLog behavior and boundaries without naming downstream integration repositories.
 - Before handoff, run `cargo fmt --all -- --check`, `cargo test --all-features`, `cargo clippy --all-features -- -D warnings`, and `git diff --check`.
