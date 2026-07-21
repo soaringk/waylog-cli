@@ -343,11 +343,12 @@ mod tests {
     use tempfile::TempDir;
 
     fn session_meta_line(session_id: &str, cwd: &Path) -> String {
-        format!(
-            r#"{{"type":"session_meta","timestamp":"2026-04-01T00:00:00Z","payload":{{"id":"{}","cwd":"{}"}}}}"#,
-            session_id,
-            cwd.display()
-        )
+        serde_json::json!({
+            "type": "session_meta",
+            "timestamp": "2026-04-01T00:00:00Z",
+            "payload": { "id": session_id, "cwd": cwd.to_string_lossy() }
+        })
+        .to_string()
     }
 
     #[tokio::test]

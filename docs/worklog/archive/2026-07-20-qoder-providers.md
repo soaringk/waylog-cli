@@ -41,7 +41,7 @@
 - Architecture: Added `--source` so a centralized parser can consume one uploaded provider artifact or a directory without local session discovery.
 - OpenCode: Added official JSON export parsing while retaining read-only SQLite discovery for local use.
 - Validation: File and two-file directory sources for Codex, OpenCode, Qoder, and QoderWork produced the expected Markdown; direct source and local discovery outputs were identical.
-- Chore review: Reopened to validate the CCX raw-upload and centralized WayLog parsing seam for simplicity, locality, and consistency.
+- Chore review: Reopened to validate the raw-artifact and centralized WayLog parsing seam for simplicity, locality, and consistency.
 - Chore: Renamed provider history availability separately from CLI installation, removed duplicate provider validation, and kept direct source collection private to `pull`.
 - Chore: Kept provider storage paths private, advertised only launchable agents, and changed batch synchronization to read one tracker entry instead of cloning all state per session.
 - Source contract: A provider directory recursively includes contributor subdirectories, fails when it contains no artifacts, and always rebuilds supplied sessions so changed raw content cannot leave stale Markdown at the same message count.

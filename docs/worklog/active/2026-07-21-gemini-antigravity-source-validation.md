@@ -10,7 +10,7 @@ Verify current Gemini CLI and Antigravity histories can be uploaded as standalon
 
 ## Known discrepancies
 
-- CCX does not yet collect or upload either provider, so their WayLog parsers are not exercised by the centralized source workflow.
+- No validated raw-artifact collection workflow exists for either provider, so their parsers are not yet exercised through centralized source imports.
 - Gemini source files lose the native `.project_root` sidecar after upload, leaving JSONL project metadata empty; legacy JSON derives a path from its local storage location instead of the original project.
 - Antigravity source files lose the native `brain/<conversation-id>/` path and `history.jsonl`, so session ID can fall back to `transcript[_full]` and project metadata becomes empty. Uploading those generic filenames would also collide across conversations.
 - Invalid timestamps fall back to the current time, and Antigravity events without `step_index` receive random message IDs, so malformed records are not deterministic.

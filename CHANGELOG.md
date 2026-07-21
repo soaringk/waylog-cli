@@ -2,7 +2,7 @@
 
 User-facing features and critical fixes are documented here from version 0.3.0 onward.
 
-## [0.3.1] - 2026-07-20
+## [0.3.1] - 2026-07-21
 
 - Added project-scoped Qoder and application-wide QoderWork history parsing.
 - Added direct parsing of provider-native files or downloaded provider directory trees, including OpenCode JSON exports.
