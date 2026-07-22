@@ -8,15 +8,15 @@ use std::sync::Arc;
 use tracing::debug;
 
 /// Shared synchronization logic for both watcher and batch sync
-pub struct Synchronizer {
+pub(crate) struct Synchronizer {
     provider: Arc<dyn Provider>,
     history_dir: PathBuf,
-    target_project_dir: PathBuf,
     tracker: Arc<SessionTracker>,
+    include_tool_calls: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum SyncStatus {
+pub(crate) enum SyncStatus {
     Synced { new_messages: usize },
     UpToDate,
     Skipped,
@@ -24,50 +24,26 @@ pub enum SyncStatus {
 }
 
 impl Synchronizer {
-    pub fn new(
-        provider: Arc<dyn Provider>,
-        tracking_root: PathBuf,
-        target_project_dir: PathBuf,
-        tracker: Arc<SessionTracker>,
-    ) -> Self {
-        Self::new_with_history_dir(
-            provider,
-            path::get_waylog_dir(&tracking_root),
-            target_project_dir,
-            tracker,
-        )
-    }
-
-    pub fn new_with_history_dir(
+    pub(crate) fn new(
         provider: Arc<dyn Provider>,
         history_dir: PathBuf,
-        target_project_dir: PathBuf,
         tracker: Arc<SessionTracker>,
+        include_tool_calls: bool,
     ) -> Self {
         Self {
             provider,
             history_dir,
-            target_project_dir,
             tracker,
+            include_tool_calls,
         }
     }
 
-    /// Sync all available sessions from the provider
-    /// Returns stats: (Synced, UpToDate, Skipped, Failed)
-    pub async fn sync_all(&self, force: bool) -> Result<Vec<(PathBuf, SyncStatus)>> {
-        let sessions = self
-            .provider
-            .get_all_sessions(&self.target_project_dir)
-            .await?;
-        self.sync_paths(sessions, force).await
-    }
-
     /// Sync a known list of session files
-    pub async fn sync_paths(
+    pub(crate) async fn sync_paths(
         &self,
         session_paths: Vec<PathBuf>,
         force: bool,
-    ) -> Result<Vec<(PathBuf, SyncStatus)>> {
+    ) -> Vec<(PathBuf, SyncStatus)> {
         let mut results = Vec::new();
 
         for session_path in session_paths {
@@ -78,11 +54,15 @@ impl Synchronizer {
             results.push((session_path, status));
         }
 
-        Ok(results)
+        results
     }
 
     /// Sync a specific session file
-    pub async fn sync_session(&self, session_path: &Path, force: bool) -> Result<SyncStatus> {
+    pub(crate) async fn sync_session(
+        &self,
+        session_path: &Path,
+        force: bool,
+    ) -> Result<SyncStatus> {
         // 1. Parse session
         let session = match self.provider.parse_session(session_path).await {
             Ok(s) => s,
@@ -94,66 +74,62 @@ impl Synchronizer {
         }
 
         // 2. Check state
-        let (markdown_path, mut synced_count) =
+        let (markdown_path, mut synced_count, previous_include_tool_calls) =
             if let Some(state) = self.tracker.get_session(&session.session_id).await {
-                (state.markdown_path, state.synced_message_count)
+                (
+                    state.markdown_path,
+                    state.synced_message_count,
+                    state.include_tool_calls,
+                )
             } else {
                 (
                     self.history_dir
                         .join(session_markdown_filename(&session, self.provider.name())),
                     0,
+                    self.include_tool_calls,
                 )
             };
 
         // 3. Handle force/missing file
-        if force || (!markdown_path.exists() && synced_count > 0) {
+        if force
+            || previous_include_tool_calls != self.include_tool_calls
+            || (!markdown_path.exists() && synced_count > 0)
+        {
             synced_count = 0;
         }
 
         // 4. Calculate new messages
-        let total_messages = session.messages.len();
+        let total_messages = exporter::message_count(&session, self.include_tool_calls);
         if synced_count >= total_messages {
             return Ok(SyncStatus::UpToDate);
         }
-
-        let new_messages: Vec<_> = session
-            .messages
-            .iter()
-            .skip(synced_count)
-            .cloned()
-            .collect();
-
-        if new_messages.is_empty() {
-            return Ok(SyncStatus::UpToDate);
-        }
+        let new_messages = total_messages - synced_count;
 
         // 5. Write to file
         if let Some(parent) = markdown_path.parent() {
             path::ensure_dir_exists(parent)?;
         }
 
-        exporter::create_markdown_file(&markdown_path, &session).await?;
+        exporter::create_markdown_file(&markdown_path, &session, self.include_tool_calls).await?;
 
         // 6. Update state
         self.tracker
             .update_session(
                 session.session_id.clone(),
-                session_path.to_path_buf(),
                 markdown_path.clone(),
                 total_messages,
+                self.include_tool_calls,
             )
-            .await?;
+            .await;
 
         // Log purely for debug, UI is handled by caller
         debug!(
             "Synced {} messages to {}",
-            new_messages.len(),
+            new_messages,
             markdown_path.display()
         );
 
-        Ok(SyncStatus::Synced {
-            new_messages: new_messages.len(),
-        })
+        Ok(SyncStatus::Synced { new_messages })
     }
 }
 
@@ -168,7 +144,11 @@ pub(crate) fn session_markdown_filename(
         .map(|m| crate::utils::string::slugify(&m.content))
         .unwrap_or_else(|| crate::utils::string::slugify(&session.session_id));
     let session_id = session_id_filename_component(&session.session_id);
-    let timestamp = session.started_at.format("%Y-%m-%d_%H-%M-%SZ");
+    let timestamp = session
+        .started_at
+        .as_ref()
+        .map(|value| value.format("%Y-%m-%d_%H-%M-%SZ").to_string())
+        .unwrap_or_else(|| "unknown-time".to_string());
 
     format!("{}-{}-{}-{}.md", timestamp, provider_name, session_id, slug)
 }
@@ -195,12 +175,10 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use std::path::Path;
     use tempfile::TempDir;
-    use tokio::sync::Mutex;
 
     struct MockProvider {
         session_path: PathBuf,
         session: ChatSession,
-        queried_projects: Arc<Mutex<Vec<PathBuf>>>,
     }
 
     fn two_message_session(
@@ -212,25 +190,48 @@ mod tests {
             session_id: session_id.to_string(),
             provider: "mock".to_string(),
             project_path,
-            started_at: timestamp,
-            updated_at: timestamp,
+            started_at: Some(timestamp),
+            updated_at: Some(timestamp),
             messages: vec![
                 ChatMessage {
                     id: "msg-1".to_string(),
-                    timestamp,
+                    timestamp: Some(timestamp),
                     role: MessageRole::User,
                     content: "First message".to_string(),
                     metadata: MessageMetadata::default(),
                 },
                 ChatMessage {
                     id: "msg-2".to_string(),
-                    timestamp,
+                    timestamp: Some(timestamp),
                     role: MessageRole::Assistant,
                     content: "Second message".to_string(),
                     metadata: MessageMetadata::default(),
                 },
             ],
         }
+    }
+
+    #[test]
+    fn missing_start_time_uses_an_explicit_filename_marker() {
+        let session = ChatSession {
+            session_id: "session-1".to_string(),
+            provider: "mock".to_string(),
+            project_path: PathBuf::from("/tmp/project"),
+            started_at: None,
+            updated_at: None,
+            messages: vec![ChatMessage {
+                id: "message-1".to_string(),
+                timestamp: None,
+                role: MessageRole::User,
+                content: "First message".to_string(),
+                metadata: MessageMetadata::default(),
+            }],
+        };
+
+        assert_eq!(
+            session_markdown_filename(&session, "mock"),
+            "unknown-time-mock-session-1-first-message.md"
+        );
     }
 
     #[async_trait]
@@ -248,80 +249,13 @@ mod tests {
             Ok(self.session.clone())
         }
 
-        async fn get_all_sessions(&self, project_path: &Path) -> Result<Vec<PathBuf>> {
-            self.queried_projects
-                .lock()
-                .await
-                .push(project_path.to_path_buf());
+        async fn get_all_sessions(&self, _project_path: &Path) -> Result<Vec<PathBuf>> {
             Ok(vec![self.session_path.clone()])
         }
 
         fn has_history(&self) -> bool {
             true
         }
-    }
-
-    #[tokio::test]
-    async fn sync_all_uses_target_project_for_lookup_and_tracking_root_for_output() {
-        let temp_dir = TempDir::new().unwrap();
-        let tracking_root = temp_dir.path().join("tracking-root");
-        let target_project = temp_dir.path().join("tracking-root").join("nested-project");
-        let session_path = temp_dir.path().join("session.jsonl");
-
-        tokio::fs::create_dir_all(&tracking_root).await.unwrap();
-        tokio::fs::create_dir_all(&target_project).await.unwrap();
-
-        let now = Utc::now();
-        let session = ChatSession {
-            session_id: "session-1".to_string(),
-            provider: "mock".to_string(),
-            project_path: target_project.clone(),
-            started_at: now,
-            updated_at: now,
-            messages: vec![ChatMessage {
-                id: "msg-1".to_string(),
-                timestamp: now,
-                role: MessageRole::User,
-                content: "Nested project session".to_string(),
-                metadata: MessageMetadata::default(),
-            }],
-        };
-
-        let queried_projects = Arc::new(Mutex::new(Vec::new()));
-        let provider = Arc::new(MockProvider {
-            session_path: session_path.clone(),
-            session,
-            queried_projects: queried_projects.clone(),
-        });
-
-        let tracker = Arc::new(
-            SessionTracker::new(tracking_root.clone(), provider.clone())
-                .await
-                .unwrap(),
-        );
-        let synchronizer = Synchronizer::new(
-            provider,
-            tracking_root.clone(),
-            target_project.clone(),
-            tracker,
-        );
-
-        let results = synchronizer.sync_all(false).await.unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, session_path);
-        assert!(matches!(
-            results[0].1,
-            SyncStatus::Synced { new_messages: 1 }
-        ));
-
-        let queried = queried_projects.lock().await;
-        assert_eq!(queried.as_slice(), &[target_project]);
-        drop(queried);
-
-        let history_dir = path::get_waylog_dir(&tracking_root);
-        let mut entries = tokio::fs::read_dir(&history_dir).await.unwrap();
-        let markdown = entries.next_entry().await.unwrap().unwrap().path();
-        assert!(markdown.starts_with(&history_dir));
     }
 
     #[tokio::test]
@@ -368,19 +302,16 @@ Second message
         .await
         .unwrap();
 
-        let queried_projects = Arc::new(Mutex::new(Vec::new()));
         let provider = Arc::new(MockProvider {
             session_path: session_path.clone(),
             session,
-            queried_projects,
         });
         let tracker = Arc::new(
-            SessionTracker::new(tracking_root.clone(), provider.clone())
+            SessionTracker::new(&history_dir, provider.name())
                 .await
                 .unwrap(),
         );
-        let synchronizer =
-            Synchronizer::new(provider, tracking_root, target_project.clone(), tracker);
+        let synchronizer = Synchronizer::new(provider, history_dir.clone(), tracker, false);
 
         let status = synchronizer
             .sync_session(&session_path, false)
@@ -392,30 +323,85 @@ Second message
         assert!(content.contains("message_count: 2"));
         assert_eq!(content.matches("Second message").count(), 1);
 
-        let tracking_root = target_project.parent().unwrap().to_path_buf();
-        let tracker_provider = Arc::new(MockProvider {
-            session_path: session_path.clone(),
-            session: two_message_session("session-1", target_project.clone(), now),
-            queried_projects: Arc::new(Mutex::new(Vec::new())),
-        });
-        let tracker = Arc::new(
-            SessionTracker::new(tracking_root.clone(), tracker_provider)
-                .await
-                .unwrap(),
-        );
-        let queried_projects = Arc::new(Mutex::new(Vec::new()));
+        let tracker = Arc::new(SessionTracker::new(&history_dir, "mock").await.unwrap());
         let provider = Arc::new(MockProvider {
             session_path: session_path.clone(),
             session: two_message_session("session-1", target_project.clone(), now),
-            queried_projects,
         });
-        let synchronizer = Synchronizer::new(provider, tracking_root, target_project, tracker);
+        let synchronizer = Synchronizer::new(provider, history_dir, tracker, false);
 
         let status = synchronizer
             .sync_session(&session_path, false)
             .await
             .unwrap();
         assert_eq!(status, SyncStatus::UpToDate);
+    }
+
+    #[tokio::test]
+    async fn changing_tool_output_mode_rewrites_existing_markdown() {
+        let temp_dir = TempDir::new().unwrap();
+        let project = temp_dir.path().join("project");
+        let session_path = temp_dir.path().join("session.jsonl");
+        let history_dir = path::get_waylog_dir(&project);
+        tokio::fs::create_dir_all(&project).await.unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 22, 0, 0, 0).unwrap();
+        let mut session = two_message_session("session-1", project.clone(), now);
+        session.messages.insert(
+            1,
+            ChatMessage {
+                id: "tool-1".to_string(),
+                timestamp: Some(now),
+                role: MessageRole::Tool,
+                content: r#"{"name":"read","input":{"path":"src/main.rs"}}"#.to_string(),
+                metadata: MessageMetadata::default(),
+            },
+        );
+
+        let provider = Arc::new(MockProvider {
+            session_path: session_path.clone(),
+            session: session.clone(),
+        });
+        let tracker = Arc::new(
+            SessionTracker::new(&history_dir, provider.name())
+                .await
+                .unwrap(),
+        );
+        Synchronizer::new(provider, history_dir.clone(), tracker, false)
+            .sync_session(&session_path, false)
+            .await
+            .unwrap();
+
+        let markdown_path = tokio::fs::read_dir(&history_dir)
+            .await
+            .unwrap()
+            .next_entry()
+            .await
+            .unwrap()
+            .unwrap()
+            .path();
+        assert!(!tokio::fs::read_to_string(&markdown_path)
+            .await
+            .unwrap()
+            .contains("## 🛠️ Tool"));
+
+        let provider = Arc::new(MockProvider {
+            session_path: session_path.clone(),
+            session,
+        });
+        let tracker = Arc::new(
+            SessionTracker::new(&history_dir, provider.name())
+                .await
+                .unwrap(),
+        );
+        let status = Synchronizer::new(provider, history_dir, tracker, true)
+            .sync_session(&session_path, false)
+            .await
+            .unwrap();
+
+        assert!(matches!(status, SyncStatus::Synced { new_messages: 3 }));
+        let markdown = tokio::fs::read_to_string(markdown_path).await.unwrap();
+        assert!(markdown.contains("include_tool_calls: true"));
+        assert!(markdown.contains("## 🛠️ Tool"));
     }
 
     #[test]
@@ -425,11 +411,11 @@ Second message
             session_id: "session-1".to_string(),
             provider: "mock".to_string(),
             project_path: PathBuf::from("/project"),
-            started_at,
-            updated_at: started_at,
+            started_at: Some(started_at),
+            updated_at: Some(started_at),
             messages: vec![ChatMessage {
                 id: "msg-1".to_string(),
-                timestamp: started_at,
+                timestamp: Some(started_at),
                 role: MessageRole::User,
                 content: "Same title".to_string(),
                 metadata: MessageMetadata::default(),

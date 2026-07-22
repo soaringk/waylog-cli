@@ -1,39 +1,74 @@
 use crate::providers::base::{ChatMessage, MessageRole};
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 
-/// Format a single message
-pub(crate) fn format_message(message: &ChatMessage) -> String {
+pub(crate) fn format_messages<'a>(messages: impl IntoIterator<Item = &'a ChatMessage>) -> String {
+    let mut groups = Vec::<Vec<&ChatMessage>>::new();
+    let mut tool_groups = HashMap::<&str, usize>::new();
+
+    for message in messages {
+        if message.role == MessageRole::Tool {
+            if let Some(call_id) = message.metadata.tool_call_id.as_deref() {
+                if let Some(index) = tool_groups.get(call_id) {
+                    groups[*index].push(message);
+                    continue;
+                }
+                tool_groups.insert(call_id, groups.len());
+            }
+        }
+        groups.push(vec![message]);
+    }
+
+    let mut md = String::new();
+    for group in groups {
+        md.push_str(&format_group(&group));
+        md.push_str("\n\n");
+    }
+    md
+}
+
+/// Format one message or one grouped tool exchange.
+fn format_group(messages: &[&ChatMessage]) -> String {
+    let message = messages[0];
     let mut md = String::new();
 
     // Header with role and timestamp
-    let role_emoji = match message.role {
-        MessageRole::User => "👤",
-        MessageRole::Assistant => "🤖",
-        MessageRole::System => "⚙️",
-    };
-
-    let role_name = match message.role {
-        MessageRole::User => "User",
-        MessageRole::Assistant => "Assistant",
-        MessageRole::System => "System",
+    let (role_emoji, role_name) = match message.role {
+        MessageRole::User => ("👤", "User"),
+        MessageRole::Assistant => ("🤖", "Assistant"),
+        MessageRole::System => ("⚙️", "System"),
+        MessageRole::Tool => ("🛠️", "Tool"),
     };
 
     md.push_str(&format!(
         "## {} {} ({})\n\n",
         role_emoji,
         role_name,
-        format_datetime(&message.timestamp)
+        format_datetime(message.timestamp.as_ref())
     ));
 
     // Content
-    md.push_str(&message.content);
+    if message.role == MessageRole::Tool {
+        let fence = tool_fence(messages);
+        md.push_str(&fence);
+        md.push('\n');
+        for (index, message) in messages.iter().enumerate() {
+            if index > 0 {
+                md.push_str("\n\n");
+            }
+            md.push_str(&message.content);
+        }
+        md.push('\n');
+        md.push_str(&fence);
+    } else {
+        md.push_str(&message.content);
+    }
     md.push('\n');
 
-    // Tool calls (Claude Code)
     if !message.metadata.tool_calls.is_empty() {
         md.push_str("\n**Tools Used:**\n");
         for tool in &message.metadata.tool_calls {
-            md.push_str(&format!("- `{}`\n", tool));
+            md.push_str(&format!("- `{tool}`\n"));
         }
     }
 
@@ -47,6 +82,16 @@ pub(crate) fn format_message(message: &ChatMessage) -> String {
     }
 
     md
+}
+
+fn tool_fence(messages: &[&ChatMessage]) -> String {
+    let longest = messages
+        .iter()
+        .flat_map(|message| message.content.split(|character| character != '`'))
+        .map(str::len)
+        .max()
+        .unwrap_or_default();
+    "`".repeat((longest + 1).max(3))
 }
 
 /// Extract a title from the first user message
@@ -69,8 +114,10 @@ pub(crate) fn extract_title(messages: &[ChatMessage]) -> String {
 }
 
 /// Format datetime in a human-readable way
-pub(crate) fn format_datetime(dt: &DateTime<Utc>) -> String {
-    dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+pub(crate) fn format_datetime(timestamp: Option<&DateTime<Utc>>) -> String {
+    timestamp
+        .map(|value| value.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| "null".to_string())
 }
 
 #[cfg(test)]
@@ -83,7 +130,7 @@ mod tests {
             id: "test-id".to_string(),
             role,
             content: content.to_string(),
-            timestamp: Utc::now(),
+            timestamp: Some(Utc::now()),
             metadata: MessageMetadata::default(),
         }
     }

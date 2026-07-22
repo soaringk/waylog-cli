@@ -4,18 +4,32 @@ use crate::utils::path;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-pub struct CodexProvider;
+pub struct CodexProvider {
+    data_dir: Option<PathBuf>,
+}
 
 impl CodexProvider {
     pub fn new() -> Self {
-        Self
+        Self { data_dir: None }
+    }
+
+    #[cfg(test)]
+    fn with_data_dir(data_dir: PathBuf) -> Self {
+        Self {
+            data_dir: Some(data_dir),
+        }
     }
 
     fn data_dir(&self) -> Result<PathBuf> {
+        if let Some(data_dir) = &self.data_dir {
+            return Ok(data_dir.clone());
+        }
+
         Ok(path::home_dir()?.join(".codex").join("sessions"))
     }
 }
@@ -24,56 +38,6 @@ impl CodexProvider {
 impl Provider for CodexProvider {
     fn name(&self) -> &str {
         "codex"
-    }
-
-    async fn find_latest_session(&self, project_path: &Path) -> Result<Option<PathBuf>> {
-        // For 'run' mode, only scan recent days (last 7 days) for performance
-        let base_session_dir = self.data_dir()?;
-
-        if !base_session_dir.exists() {
-            return Ok(None);
-        }
-
-        let now = Utc::now();
-        let mut candidates = Vec::new();
-
-        // Check last 7 days
-        for days_ago in 0..7 {
-            let date = now - chrono::Duration::days(days_ago);
-            let day_dir = base_session_dir
-                .join(date.format("%Y").to_string())
-                .join(date.format("%m").to_string())
-                .join(date.format("%d").to_string());
-
-            if !day_dir.exists() {
-                continue;
-            }
-
-            // Scan this day's directory
-            if let Ok(mut entries) = fs::read_dir(&day_dir).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let path = entry.path();
-                    if path.is_file()
-                        && path.extension().and_then(|s| s.to_str()) == Some("jsonl")
-                        && self
-                            .probe_project_path(&path, project_path)
-                            .await
-                            .unwrap_or(false)
-                    {
-                        if let Ok(metadata) = fs::metadata(&path).await {
-                            if let Ok(modified) = metadata.modified() {
-                                candidates.push((path, modified));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Sort by modification time, newest first
-        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.1));
-
-        Ok(candidates.into_iter().next().map(|(p, _)| p))
     }
 
     async fn find_session(&self, project_path: &Path, session_id: &str) -> Result<Option<PathBuf>> {
@@ -153,7 +117,6 @@ impl Provider for CodexProvider {
             .and_then(|stem| stem.to_str())
             .unwrap_or("unknown")
             .to_string();
-        let mut started_at = Utc::now();
         let mut session_project_path = PathBuf::new();
 
         while let Some(line) = lines.next_line().await? {
@@ -161,54 +124,50 @@ impl Provider for CodexProvider {
                 continue;
             }
 
-            if let Ok(event) = serde_json::from_str::<CodexEvent>(&line) {
-                match event.event_type.as_str() {
-                    "session_meta" => {
-                        if let Some(payload) = event.payload {
-                            if let Some(id) = payload.id.filter(|id| !id.is_empty()) {
-                                session_id = id;
-                            }
-                            if let Some(cwd) = payload.cwd {
-                                session_project_path = PathBuf::from(cwd);
-                            }
+            let event: CodexEvent = serde_json::from_str(&line)?;
+            match event.event_type.as_str() {
+                "session_meta" => {
+                    if let Some(payload) = event.payload {
+                        if let Some(id) = payload
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty())
+                        {
+                            session_id = id.to_string();
                         }
-                    }
-                    "turn_context" => {
-                        if let Some(cwd) = event.payload.and_then(|payload| payload.cwd) {
+                        if let Some(cwd) = payload.get("cwd").and_then(Value::as_str) {
                             session_project_path = PathBuf::from(cwd);
                         }
                     }
-                    "response_item" => {
-                        if let Some(payload) = event.payload {
-                            if let Some(msg) =
-                                self.parse_response_item(payload, &event.timestamp)?
-                            {
-                                if messages.is_empty() {
-                                    started_at = msg.timestamp;
-                                }
-
-                                // Simple deduplication
-                                let is_duplicate =
-                                    messages.last().is_some_and(|last: &ChatMessage| {
-                                        last.role == msg.role && last.content == msg.content
-                                    });
-                                if !is_duplicate {
-                                    messages.push(msg);
-                                }
-                            }
+                }
+                "turn_context" => {
+                    if let Some(cwd) = event
+                        .payload
+                        .as_ref()
+                        .and_then(|payload| payload.get("cwd"))
+                        .and_then(Value::as_str)
+                    {
+                        session_project_path = PathBuf::from(cwd);
+                    }
+                }
+                "response_item" => {
+                    if let Some(payload) = event.payload {
+                        for msg in self.parse_response_item(payload, event.timestamp.as_deref())? {
+                            messages.push(msg);
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
 
+        let (started_at, updated_at) = message_time_range(&messages);
         Ok(ChatSession {
             session_id,
             provider: self.name().to_string(),
             project_path: session_project_path,
             started_at,
-            updated_at: messages.last().map(|m| m.timestamp).unwrap_or(started_at),
+            updated_at,
             messages,
         })
     }
@@ -241,8 +200,13 @@ impl CodexProvider {
             checked_lines += 1;
 
             if let Ok(event) = serde_json::from_str::<CodexEvent>(&line) {
-                if let Some(cwd_str) = event.payload.and_then(|p| p.cwd) {
-                    return Ok(paths_equivalent(Path::new(&cwd_str), target_project_path).await);
+                if let Some(cwd_str) = event
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("cwd"))
+                    .and_then(Value::as_str)
+                {
+                    return Ok(paths_equivalent(Path::new(cwd_str), target_project_path).await);
                 }
             }
         }
@@ -251,53 +215,52 @@ impl CodexProvider {
 
     fn parse_response_item(
         &self,
-        payload: CodexPayload,
-        timestamp: &str,
-    ) -> Result<Option<ChatMessage>> {
-        let role = match payload.role.as_deref() {
+        payload: Value,
+        timestamp: Option<&str>,
+    ) -> Result<Vec<ChatMessage>> {
+        let timestamp = timestamp
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&Utc));
+        if is_tool_payload(&payload) {
+            let message_id = payload
+                .get("call_id")
+                .or_else(|| payload.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            return Ok(vec![ChatMessage::tool(message_id, timestamp, payload)]);
+        }
+
+        let role = match payload.get("role").and_then(Value::as_str) {
             Some("user") => MessageRole::User,
             Some("assistant") => MessageRole::Assistant,
-            _ => return Ok(None),
+            _ => return Ok(Vec::new()),
         };
 
-        // Extract text content
-        let content = payload
-            .content
-            .and_then(|c| c.into_iter().find_map(|item| item.text))
-            .unwrap_or_default();
-
-        if content.is_empty() {
-            return Ok(None);
-        }
-
-        let timestamp = DateTime::parse_from_rfc3339(timestamp)
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now());
-
-        // Filter out system injections which Codex logs as "user" messages
-        if role == MessageRole::User {
-            // 1. Environment context
-            if content.contains("<environment_context>") {
-                return Ok(None);
-            }
-            // 2. AGENTS.md instructions
-            if content.contains("<INSTRUCTIONS>") || content.contains("# AGENTS.md instructions") {
-                return Ok(None);
-            }
-        }
-
-        Ok(Some(ChatMessage {
-            id: uuid::Uuid::new_v4().to_string(),
-            timestamp,
-            role,
-            content,
-            metadata: MessageMetadata {
-                model: None,
-                tokens: None,
-                tool_calls: Vec::new(),
-                thoughts: Vec::new(),
-            },
-        }))
+        let message_id = payload
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        Ok(payload
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                item.get("text")
+                    .or_else(|| item.get("refusal"))
+                    .and_then(Value::as_str)
+                    .map(|content| ChatMessage {
+                        id: format!("{message_id}:text:{index}"),
+                        timestamp,
+                        role,
+                        content: content.to_string(),
+                        metadata: MessageMetadata::default(),
+                    })
+            })
+            .collect())
     }
 }
 
@@ -306,24 +269,8 @@ impl CodexProvider {
 struct CodexEvent {
     #[serde(rename = "type")]
     event_type: String,
-    timestamp: String,
-    payload: Option<CodexPayload>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CodexPayload {
-    id: Option<String>,
-    role: Option<String>,
-    cwd: Option<String>,
-    content: Option<Vec<CodexContent>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CodexContent {
-    #[serde(rename = "type")]
-    #[allow(dead_code)]
-    content_type: String,
-    text: Option<String>,
+    timestamp: Option<String>,
+    payload: Option<Value>,
 }
 
 async fn paths_equivalent(left: &Path, right: &Path) -> bool {
@@ -349,6 +296,35 @@ mod tests {
             "payload": { "id": session_id, "cwd": cwd.to_string_lossy() }
         })
         .to_string()
+    }
+
+    #[tokio::test]
+    async fn finds_latest_session_outside_recent_date_directories() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("project");
+        let session_path = temp_dir
+            .path()
+            .join("2020")
+            .join("01")
+            .join("01")
+            .join("session.jsonl");
+        tokio::fs::create_dir_all(session_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::create_dir(&project_path).await.unwrap();
+        tokio::fs::write(
+            &session_path,
+            session_meta_line("long-running-session", &project_path),
+        )
+        .await
+        .unwrap();
+
+        let found = CodexProvider::with_data_dir(temp_dir.path().to_path_buf())
+            .find_latest_session(&project_path)
+            .await
+            .unwrap();
+
+        assert_eq!(found, Some(session_path));
     }
 
     #[tokio::test]
@@ -399,5 +375,132 @@ mod tests {
             .probe_project_path(&file_path, &real_project)
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn detects_and_normalizes_tool_payloads_without_a_type_allowlist() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("session.jsonl");
+        let payloads = [
+            serde_json::json!({
+                "type": "function_call",
+                "name": "read_file",
+                "arguments": "{\"path\":\"src/main.rs\"}",
+                "call_id": "call-1",
+                "provider_extension": {
+                    "content": [{"type": "input_file", "file_id": "file-1"}]
+                }
+            }),
+            serde_json::json!({
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": [{"type": "input_text", "text": "file contents", "extra": true}]
+            }),
+            serde_json::json!({
+                "type": "tool_search_call",
+                "call_id": "call-2",
+                "arguments": {"query": "read"}
+            }),
+            serde_json::json!({
+                "type": "tool_search_output",
+                "call_id": "call-2",
+                "tools": [{"name": "read_file", "defer_loading": true}]
+            }),
+            serde_json::json!({
+                "type": "future_tool_action",
+                "call_id": "call-3",
+                "provider_payload": {"kept": true}
+            }),
+        ];
+        let expected = [
+            serde_json::json!({
+                "name": "read_file",
+                "arguments": {"path": "src/main.rs"},
+                "provider_extension": {
+                    "content": [{"type": "input_file", "file_id": "file-1"}]
+                }
+            }),
+            serde_json::json!({
+                "output": [{"type": "input_text", "text": "file contents", "extra": true}]
+            }),
+            serde_json::json!({"arguments": {"query": "read"}}),
+            serde_json::json!({
+                "tools": [{"name": "read_file", "defer_loading": true}]
+            }),
+            serde_json::json!({"provider_payload": {"kept": true}}),
+        ];
+        let lines = payloads.iter().enumerate().map(|(index, payload)| {
+            serde_json::json!({
+                "type": "response_item",
+                "timestamp": format!("2026-07-22T00:00:0{index}Z"),
+                "payload": payload
+            })
+        });
+        tokio::fs::write(
+            &file_path,
+            lines
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .await
+        .unwrap();
+
+        let session = CodexProvider::new()
+            .parse_session(&file_path)
+            .await
+            .unwrap();
+
+        assert_eq!(session.messages.len(), payloads.len());
+        assert!(session
+            .messages
+            .iter()
+            .all(|message| message.role == MessageRole::Tool));
+        for (message, expected) in session.messages.iter().zip(expected) {
+            assert_eq!(
+                serde_json::from_str::<Value>(&message.content).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn preserves_injected_user_text_and_each_content_item() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("session.jsonl");
+        let event = serde_json::json!({
+            "type": "response_item",
+            "timestamp": "invalid",
+            "payload": {
+                "type": "message",
+                "id": "message-1",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "<environment_context>keep me</environment_context>"},
+                    {"type": "input_text", "text": "second block"}
+                ]
+            }
+        });
+        tokio::fs::write(&file_path, event.to_string())
+            .await
+            .unwrap();
+
+        let session = CodexProvider::new()
+            .parse_session(&file_path)
+            .await
+            .unwrap();
+
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.started_at, None);
+        assert_eq!(session.updated_at, None);
+        assert!(session
+            .messages
+            .iter()
+            .all(|message| message.timestamp.is_none()));
+        assert_eq!(
+            session.messages[0].content,
+            "<environment_context>keep me</environment_context>"
+        );
+        assert_eq!(session.messages[1].content, "second block");
     }
 }

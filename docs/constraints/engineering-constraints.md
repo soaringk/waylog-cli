@@ -7,8 +7,13 @@
 - Output directories are merge targets: a pull may create or replace Markdown for sessions it processes but must not remove unrelated files.
 - `--recursive` broadens lookup to visible descendant projects without changing the output root; `--hidden` is required to traverse hidden descendants, and `.waylog` output trees are always skipped.
 - Markdown frontmatter is the persisted sync state, and filenames include the provider session ID to preserve identity outside the local history tree.
+- Provider-tagged sync state restoration must match both provider and session ID because one output directory may contain multiple providers.
 - Session parsing failures make a batch pull fail only when every attempted session fails; a one-session pull reflects that session's result.
 - `--source` bypasses local session discovery, recursively scans regular files below the supplied provider directory, fails when it finds none, and rebuilds supplied sessions even when their message count is unchanged.
+- Tool messages are opt-in output; changing `--include-tool-calls` must rewrite the affected Markdown instead of reusing incompatible sync state.
+- Provider parsing must not fabricate source content: missing or invalid values remain absent or `null` in Markdown, and timestamps never fall back to wall-clock time.
+- Tool detection uses structural protocol markers instead of closed type allowlists. Markdown may remove only confirmed stable wrappers; unsafe normalization falls back to the complete native value.
+- Latest-session discovery must search the provider's complete history scope; storage date partitions describe session creation, not recent activity.
 
 ## Compatibility
 

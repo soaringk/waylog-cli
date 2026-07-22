@@ -1,8 +1,6 @@
-use crate::error::Result;
-use crate::synchronizer::session_markdown_filename;
-use crate::{exporter, providers, session};
+use crate::synchronizer::{SyncStatus, Synchronizer};
+use crate::{providers, session};
 use std::sync::Arc;
-use tokio::process::Child;
 use tokio::task::JoinHandle;
 use tracing;
 
@@ -15,55 +13,35 @@ use tracing;
 /// Errors during cleanup are logged but don't prevent the function from completing.
 pub(crate) async fn cleanup_and_sync(
     watcher_handle: &JoinHandle<()>,
-    _child: &mut Child,
     tracker: &Arc<session::SessionTracker>,
     provider: &Arc<dyn providers::base::Provider>,
     project_path: &std::path::Path,
     waylog_dir: &std::path::Path,
-    _exit_status: Option<std::process::ExitStatus>,
-) -> Result<()> {
-    // Stop the file watcher
+) {
     watcher_handle.abort();
-    // Wait a bit for the watcher to stop (non-blocking, ignore result)
-    // Note: JoinHandle is not Copy, so we can't await the reference directly
-    // Just abort is sufficient, the task will be cleaned up
-
-    // Do a final sync
     tracing::info!("Session ended, performing final sync...");
 
-    if let Ok(Some(session_file)) = provider.find_latest_session(project_path).await {
-        if let Ok((session, new_messages)) = tracker.get_new_messages(&session_file).await {
-            if !new_messages.is_empty() {
-                tracing::info!("Syncing {} final messages", new_messages.len());
-
-                let markdown_path =
-                    if let Some(existing) = tracker.get_markdown_path(&session.session_id).await {
-                        existing
-                    } else {
-                        waylog_dir.join(session_markdown_filename(&session, provider.name()))
-                    };
-
-                // Rewrite from provider source so frontmatter remains authoritative.
-                if let Err(e) = exporter::create_markdown_file(&markdown_path, &session).await {
-                    tracing::error!("Failed to write markdown file: {}", e);
-                }
-
-                if let Err(e) = tracker
-                    .update_session(
-                        session.session_id.clone(),
-                        session_file,
-                        markdown_path.clone(),
-                        session.messages.len(),
-                    )
-                    .await
-                {
-                    tracing::error!("Failed to update session: {}", e);
-                } else {
-                    tracing::info!("✓ Final sync complete: {}", markdown_path.display());
-                }
-            }
+    let session_file = match provider.find_latest_session(project_path).await {
+        Ok(Some(path)) => path,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::error!("Failed to find final session: {}", error);
+            return;
         }
-    }
+    };
+    let synchronizer = Synchronizer::new(
+        provider.clone(),
+        waylog_dir.to_path_buf(),
+        tracker.clone(),
+        false,
+    );
 
-    Ok(())
+    match synchronizer.sync_session(&session_file, false).await {
+        Ok(SyncStatus::Synced { new_messages }) => {
+            tracing::info!("✓ Final sync complete: {} messages", new_messages);
+        }
+        Ok(SyncStatus::Failed(error)) => tracing::error!("Final sync failed: {}", error),
+        Err(error) => tracing::error!("Final sync failed: {}", error),
+        Ok(SyncStatus::UpToDate | SyncStatus::Skipped) => {}
+    }
 }

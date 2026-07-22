@@ -58,6 +58,9 @@ waylog pull
 # Recover one workspace, including descendant projects, into one history
 waylog pull --recursive
 
+# Include tool calls and results as Tool sections
+waylog pull --include-tool-calls
+
 # Choose the output directory for any pull mode
 waylog pull --recursive --output-dir <directory>
 
@@ -69,6 +72,8 @@ waylog pull --provider codex --source <conversation/codex> --output-dir <directo
 ```
 
 A source directory may contain contributor subdirectories. Run the command once per downloaded provider directory; supplied artifacts regenerate their Markdown. Repeated pulls to one `--output-dir` update processed sessions without deleting other files.
+
+Tool calls are omitted by default. `--include-tool-calls` groups each recognized request and response into one `Tool` section, removes stable protocol wrappers for readability, and falls back to the complete native payload when normalization is unsafe. Existing Markdown is rewritten when this mode changes.
 
 ![WayLog Pull Demo](demo/pull.gif)
 

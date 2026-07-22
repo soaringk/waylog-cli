@@ -63,7 +63,6 @@ pub(super) async fn parse_jsonl_session(
 
     let mut messages = Vec::new();
     let mut session_id = String::new();
-    let mut started_at = Utc::now();
     let mut project_path = PathBuf::new();
 
     while let Some(line) = lines.next_line().await? {
@@ -89,24 +88,18 @@ pub(super) async fn parse_jsonl_session(
         }
 
         if matches!(event.event_type.as_str(), "user" | "assistant") {
-            if let Some(message) = parse_message(event)? {
-                if messages.is_empty() {
-                    started_at = message.timestamp;
-                }
-                messages.push(message);
-            }
+            let parsed = parse_messages(event)?;
+            messages.extend(parsed);
         }
     }
 
+    let (started_at, updated_at) = message_time_range(&messages);
     Ok(ChatSession {
         session_id,
         provider: provider_name.to_string(),
         project_path,
         started_at,
-        updated_at: messages
-            .last()
-            .map(|message| message.timestamp)
-            .unwrap_or(started_at),
+        updated_at,
         messages,
     })
 }
@@ -141,109 +134,84 @@ impl Provider for ClaudeProvider {
     }
 }
 
-fn parse_message(event: ClaudeEvent) -> Result<Option<ChatMessage>> {
+fn parse_messages(event: ClaudeEvent) -> Result<Vec<ChatMessage>> {
     let role = match event.event_type.as_str() {
         "user" => MessageRole::User,
         "assistant" => MessageRole::Assistant,
-        _ => return Ok(None),
+        _ => return Ok(Vec::new()),
     };
-
-    let content = match &event.message {
-        Some(msg) => match &msg.content {
-            ClaudeContent::Text(text) => text.clone(),
-            ClaudeContent::Array(items) => items
-                .iter()
-                .filter_map(|item| {
-                    if item.content_type == "text" {
-                        item.text.clone()
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        },
-        None => return Ok(None),
+    let Some(message) = event.message else {
+        return Ok(Vec::new());
     };
-
-    if content.is_empty() {
-        return Ok(None);
-    }
-
-    let content = if role == MessageRole::User {
-        let re = regex::Regex::new(r"(?s)<ide_[a-z_]+>.*?</ide_[a-z_]+>")
-            .map_err(|error| WaylogError::Internal(error.to_string()))?;
-        let clean_content = re.replace_all(&content, "").to_string();
-
-        if clean_content.trim().is_empty() {
-            return Ok(None);
-        }
-
-        format_claude_xml(clean_content.trim())
-    } else {
-        content
+    let timestamp = parse_timestamp(event.timestamp.as_ref());
+    let message_id = event
+        .uuid
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let model = message.model;
+    let tokens = message.usage.as_ref().map(|usage| TokenUsage {
+        input: usage.input_tokens,
+        output: usage.output_tokens,
+        cached: usage.cache_read_input_tokens.unwrap_or(0),
+    });
+    let items = match message.content {
+        ClaudeContent::Text(text) => vec![serde_json::json!({"type": "text", "text": text})],
+        ClaudeContent::Array(items) => items,
     };
+    let tool_calls = items
+        .iter()
+        .filter(|item| is_tool_payload(item))
+        .filter_map(|item| {
+            item.get("name")
+                .or_else(|| item.get("tool"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut messages = Vec::new();
+    let mut text_index = 0;
+    let mut tool_index = 0;
 
-    let timestamp = parse_timestamp(event.timestamp.as_ref()).unwrap_or_else(Utc::now);
-
-    let (model, tokens, tool_calls) = if let Some(msg) = &event.message {
-        let model = msg.model.clone();
-        let tokens = msg.usage.as_ref().map(|usage| TokenUsage {
-            input: usage.input_tokens,
-            output: usage.output_tokens,
-            cached: usage.cache_read_input_tokens.unwrap_or(0),
-        });
-
-        let tool_calls = if let ClaudeContent::Array(items) = &msg.content {
-            items
-                .iter()
-                .filter(|item| item.content_type == "tool_use")
-                .filter_map(|item| item.name.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        (model, tokens, tool_calls)
-    } else {
-        (None, None, Vec::new())
-    };
-
-    Ok(Some(ChatMessage {
-        id: event
-            .uuid
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-        timestamp,
-        role,
-        content,
-        metadata: MessageMetadata {
-            model,
-            tokens,
-            tool_calls,
-            thoughts: Vec::new(),
-        },
-    }))
-}
-
-fn format_claude_xml(content: &str) -> String {
-    if let Some(start) = content.find("<command-name>") {
-        if let Some(end) = content[start..].find("</command-name>") {
-            let cmd = &content[start + 14..start + end];
-
-            if cmd.trim().starts_with('/') {
-                return format!("> {}", cmd.trim());
+    for item in items {
+        match item.get("type").and_then(serde_json::Value::as_str) {
+            Some("text") => {
+                let Some(text) = item.get("text").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                messages.push(ChatMessage {
+                    id: format!("{message_id}:text:{text_index}"),
+                    timestamp,
+                    role,
+                    content: text.to_string(),
+                    metadata: MessageMetadata {
+                        model: model.clone(),
+                        tokens: if text_index == 0 {
+                            tokens.clone()
+                        } else {
+                            None
+                        },
+                        tool_calls: if text_index == 0 {
+                            tool_calls.clone()
+                        } else {
+                            Vec::new()
+                        },
+                        ..Default::default()
+                    },
+                });
+                text_index += 1;
             }
+            _ if is_tool_payload(&item) => {
+                messages.push(ChatMessage::tool(
+                    format!("{message_id}:tool:{tool_index}"),
+                    timestamp,
+                    item,
+                ));
+                tool_index += 1;
+            }
+            _ => {}
         }
     }
 
-    if let Some(start) = content.find("<local-command-stdout>") {
-        if let Some(end) = content[start..].find("</local-command-stdout>") {
-            let out = &content[start + 22..start + end];
-            return format!("> ⎿ {}", out.trim());
-        }
-    }
-
-    content.to_string()
+    Ok(messages)
 }
 
 async fn is_main_session(path: &Path) -> Result<bool> {
@@ -262,16 +230,9 @@ async fn is_main_session(path: &Path) -> Result<bool> {
         }
         checked_lines += 1;
 
-        if line.contains("\"isSidechain\":true") {
-            return Ok(false);
-        }
-        if line.contains("\"isSidechain\":false") {
-            return Ok(true);
-        }
-
         if let Ok(event) = serde_json::from_str::<ClaudeEvent>(&line) {
-            if event.is_sidechain == Some(true) {
-                return Ok(false);
+            if let Some(is_sidechain) = event.is_sidechain {
+                return Ok(!is_sidechain);
             }
         }
     }
@@ -318,15 +279,7 @@ struct ClaudeMessage {
 #[serde(untagged)]
 enum ClaudeContent {
     Text(String),
-    Array(Vec<ClaudeContentItem>),
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaudeContentItem {
-    #[serde(rename = "type")]
-    content_type: String,
-    text: Option<String>,
-    name: Option<String>,
+    Array(Vec<serde_json::Value>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -357,25 +310,43 @@ mod tests {
     }
 
     #[test]
-    fn test_ide_tag_filtering() {
+    fn preserves_user_text_without_rewriting_provider_markup() {
         let content = "<ide_opened_file>some/path/file.txt</ide_opened_file>";
         let event = create_user_event(content);
-        let result = parse_message(event).unwrap();
+        let result = parse_messages(event).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content, content);
+    }
 
-        assert!(
-            result.is_none(),
-            "Pure IDE tag message should be filtered out"
-        );
+    #[test]
+    fn parses_tool_use_and_result_as_tool_messages() {
+        let event = ClaudeEvent {
+            event_type: "assistant".to_string(),
+            session_id: Some("test-session".to_string()),
+            cwd: None,
+            timestamp: Some(serde_json::json!("2026-07-22T00:00:00Z")),
+            uuid: Some("assistant-1".to_string()),
+            is_sidechain: None,
+            message: Some(ClaudeMessage {
+                content: ClaudeContent::Array(vec![
+                    serde_json::json!({"type": "text", "text": "Checking the file"}),
+                    serde_json::json!({"type": "tool_use", "id": "tool-1", "name": "Read", "input": {"file_path": "src/main.rs"}}),
+                    serde_json::json!({"type": "tool_result", "tool_use_id": "tool-1", "content": "file contents"}),
+                ]),
+                model: Some("test-model".to_string()),
+                usage: None,
+            }),
+        };
 
-        let content = "Check this file.\n<ide_opened_file>path/to/file</ide_opened_file>";
-        let event = create_user_event(content);
-        let result = parse_message(event).unwrap();
+        let messages = parse_messages(event).unwrap();
 
-        assert!(result.is_some());
-        let msg = result.unwrap();
-        assert_eq!(
-            msg.content, "Check this file.",
-            "Tag should be stripped from mixed content"
-        );
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, MessageRole::Assistant);
+        assert_eq!(messages[1].role, MessageRole::Tool);
+        assert_eq!(messages[1].metadata.tool_call_id.as_deref(), Some("tool-1"));
+        assert!(messages[1].content.contains("src/main.rs"));
+        assert_eq!(messages[2].role, MessageRole::Tool);
+        assert_eq!(messages[2].metadata.tool_call_id.as_deref(), Some("tool-1"));
+        assert!(messages[2].content.contains("file contents"));
     }
 }

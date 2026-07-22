@@ -27,9 +27,9 @@ impl FileWatcher {
     ) -> Self {
         let synchronizer = Synchronizer::new(
             provider.clone(),
-            tracking_root,
-            target_project_dir.clone(),
-            tracker.clone(),
+            crate::utils::path::get_waylog_dir(&tracking_root),
+            tracker,
+            false,
         );
 
         Self {

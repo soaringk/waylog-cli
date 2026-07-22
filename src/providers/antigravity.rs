@@ -4,6 +4,7 @@ use crate::utils::path;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -85,39 +86,25 @@ impl Provider for AntigravityProvider {
             .unwrap_or_default();
 
         let mut messages = Vec::new();
-        let mut started_at = Utc::now();
-
         while let Some(line) = lines.next_line().await? {
             if line.trim().is_empty() {
                 continue;
             }
 
-            let Ok(event) = serde_json::from_str::<AntigravityEvent>(&line) else {
-                continue;
-            };
+            let event: AntigravityEvent = serde_json::from_str(&line)?;
 
-            let Some(message) = event.into_chat_message() else {
-                continue;
-            };
-
-            if messages.is_empty() {
-                started_at = message.timestamp;
-            }
-
-            let is_duplicate = messages.last().is_some_and(|last: &ChatMessage| {
-                last.role == message.role && last.content == message.content
-            });
-            if !is_duplicate {
+            for message in event.into_chat_messages() {
                 messages.push(message);
             }
         }
 
+        let (started_at, updated_at) = message_time_range(&messages);
         Ok(ChatSession {
             session_id,
             provider: self.name().to_string(),
             project_path,
             started_at,
-            updated_at: messages.last().map(|m| m.timestamp).unwrap_or(started_at),
+            updated_at,
             messages,
         })
     }
@@ -260,66 +247,65 @@ struct AntigravityEvent {
     event_type: String,
     source: String,
     status: Option<String>,
-    created_at: String,
+    created_at: Option<String>,
     content: Option<String>,
     thinking: Option<String>,
-    tool_calls: Option<Vec<AntigravityToolCall>>,
+    tool_calls: Option<Vec<Value>>,
     step_index: Option<u64>,
 }
 
 impl AntigravityEvent {
-    fn into_chat_message(self) -> Option<ChatMessage> {
+    fn into_chat_messages(self) -> Vec<ChatMessage> {
         if self
             .status
             .as_deref()
             .is_some_and(|status| status != "DONE")
         {
-            return None;
+            return Vec::new();
         }
 
         let role = match (self.event_type.as_str(), self.source.as_str()) {
             ("USER_INPUT", "USER_EXPLICIT") => MessageRole::User,
             ("PLANNER_RESPONSE", "MODEL") => MessageRole::Assistant,
-            _ => return None,
+            _ => return Vec::new(),
         };
 
         let content = self.content.unwrap_or_default();
-        if content.trim().is_empty() {
-            return None;
-        }
+        let timestamp = self
+            .created_at
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&Utc));
 
-        let timestamp = DateTime::parse_from_rfc3339(&self.created_at)
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now());
-
-        let tool_calls = self
-            .tool_calls
-            .unwrap_or_default()
-            .into_iter()
-            .map(|call| call.name)
+        let message_id = self
+            .step_index
+            .map(|idx| idx.to_string())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let tool_calls = self.tool_calls.unwrap_or_default();
+        let tool_names = tool_calls
+            .iter()
+            .filter_map(|call| call.get("name").and_then(Value::as_str))
+            .map(str::to_string)
             .collect();
-
-        Some(ChatMessage {
-            id: self
-                .step_index
-                .map(|idx| idx.to_string())
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-            timestamp,
-            role,
-            content,
-            metadata: MessageMetadata {
-                model: None,
-                tokens: None,
-                tool_calls,
-                thoughts: self.thinking.into_iter().collect(),
-            },
-        })
+        let mut messages = Vec::new();
+        if !content.trim().is_empty() {
+            messages.push(ChatMessage {
+                id: message_id.clone(),
+                timestamp,
+                role,
+                content,
+                metadata: MessageMetadata {
+                    tool_calls: tool_names,
+                    thoughts: self.thinking.into_iter().collect(),
+                    ..Default::default()
+                },
+            });
+        }
+        messages.extend(tool_calls.into_iter().enumerate().map(|(index, call)| {
+            ChatMessage::tool(format!("{message_id}:tool:{index}"), timestamp, call)
+        }));
+        messages
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct AntigravityToolCall {
-    name: String,
 }
 
 #[cfg(test)]
@@ -345,27 +331,35 @@ mod tests {
             r#"{"type":"USER_INPUT","source":"USER_EXPLICIT","status":"DONE","created_at":"2026-05-23T01:02:03Z","content":"hello","step_index":1}"#,
         )
         .unwrap()
-        .into_chat_message()
-        .unwrap();
+        .into_chat_messages();
+        let user = &user[0];
         assert_eq!(user.role, MessageRole::User);
         assert_eq!(user.content, "hello");
 
         let model = serde_json::from_str::<AntigravityEvent>(
-            r#"{"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE","created_at":"2026-05-23T01:02:04Z","content":"hi","thinking":"plan","tool_calls":[{"name":"view_file"}],"step_index":2}"#,
+            r#"{"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE","created_at":"2026-05-23T01:02:04Z","content":"hi","thinking":"plan","tool_calls":[{"name":"view_file","arguments":{"path":"src/main.rs"},"provider_extension":{"nested":true}}],"step_index":2}"#,
         )
         .unwrap()
-        .into_chat_message()
-        .unwrap();
-        assert_eq!(model.role, MessageRole::Assistant);
-        assert_eq!(model.metadata.thoughts, vec!["plan".to_string()]);
-        assert_eq!(model.metadata.tool_calls, vec!["view_file".to_string()]);
+        .into_chat_messages();
+        let model_message = &model[0];
+        assert_eq!(model_message.role, MessageRole::Assistant);
+        assert_eq!(model_message.metadata.thoughts, vec!["plan".to_string()]);
+        assert_eq!(model[1].role, MessageRole::Tool);
+        assert_eq!(
+            serde_json::from_str::<Value>(&model[1].content).unwrap(),
+            serde_json::json!({
+                "name": "view_file",
+                "arguments": {"path": "src/main.rs"},
+                "provider_extension": {"nested": true}
+            })
+        );
 
         let system = serde_json::from_str::<AntigravityEvent>(
             r#"{"type":"EPHEMERAL_MESSAGE","source":"SYSTEM","status":"DONE","created_at":"2026-05-23T01:02:05Z","content":"ignored"}"#,
         )
         .unwrap()
-        .into_chat_message();
-        assert!(system.is_none());
+        .into_chat_messages();
+        assert!(system.is_empty());
     }
 
     #[tokio::test]

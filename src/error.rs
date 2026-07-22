@@ -23,9 +23,6 @@ pub enum WaylogError {
     #[error("Path error: {0}")]
     PathError(String),
 
-    #[error("No waylog project found.\nTo start a new session, use `waylog run <AGENT>`.\nTo sync history, please run this command inside an active waylog project (.waylog folder found).")]
-    ProjectNotFound,
-
     #[error("Missing required argument <AGENT>")]
     MissingAgent,
 
@@ -48,9 +45,7 @@ impl WaylogError {
             // Data format errors
             WaylogError::Json(_) => exitcode::DATAERR,
             // Input file/resource errors
-            WaylogError::ProjectNotFound
-            | WaylogError::SessionNotFound { .. }
-            | WaylogError::Io(_) => exitcode::NOINPUT,
+            WaylogError::SessionNotFound { .. } | WaylogError::Io(_) => exitcode::NOINPUT,
             // Service unavailable
             WaylogError::AgentNotInstalled(_) => exitcode::UNAVAILABLE,
             // Internal software errors

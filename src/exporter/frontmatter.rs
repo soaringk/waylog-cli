@@ -3,11 +3,12 @@ use std::path::Path;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Frontmatter {
     pub session_id: Option<String>,
     pub provider: Option<String>,
     pub message_count: Option<usize>,
+    pub include_tool_calls: Option<bool>,
 }
 
 /// Parse minimal frontmatter from a markdown file
@@ -19,11 +20,7 @@ pub async fn parse_frontmatter(path: &Path) -> Result<Frontmatter> {
     let n = file.read(&mut buffer).await?;
     let content = String::from_utf8_lossy(&buffer[..n]);
 
-    let mut fm = Frontmatter {
-        session_id: None,
-        provider: None,
-        message_count: None,
-    };
+    let mut fm = Frontmatter::default();
 
     if let Some(stripped) = content.strip_prefix("---") {
         if let Some(end_idx) = stripped.find("---") {
@@ -39,6 +36,10 @@ pub async fn parse_frontmatter(path: &Path) -> Result<Frontmatter> {
                 } else if let Some(val) = line.strip_prefix("message_count:") {
                     if let Ok(count) = val.trim().parse() {
                         fm.message_count = Some(count);
+                    }
+                } else if let Some(val) = line.strip_prefix("include_tool_calls:") {
+                    if let Ok(include) = val.trim().parse() {
+                        fm.include_tool_calls = Some(include);
                     }
                 }
             }
@@ -61,6 +62,7 @@ mod tests {
 provider: claude
 session_id: test-session-123
 message_count: 5
+include_tool_calls: true
 ---
 # Title
 Content here
@@ -71,6 +73,7 @@ Content here
         assert_eq!(fm.provider, Some("claude".to_string()));
         assert_eq!(fm.session_id, Some("test-session-123".to_string()));
         assert_eq!(fm.message_count, Some(5));
+        assert_eq!(fm.include_tool_calls, Some(true));
     }
 
     #[tokio::test]

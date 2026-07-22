@@ -58,6 +58,9 @@ waylog pull
 # 将当前工作区及其子项目聚合到同一份历史中
 waylog pull --recursive
 
+# 将工具调用及结果输出为 Tool 段落
+waylog pull --include-tool-calls
+
 # 为任意 pull 模式指定输出目录
 waylog pull --recursive --output-dir <目录>
 
@@ -69,6 +72,8 @@ waylog pull --provider codex --source <conversation/codex> --output-dir <目录>
 ```
 
 source 目录可以包含贡献者子目录。每个下载后的 provider 目录执行一次；传入的原始记录会重新生成对应 Markdown。多次写入同一个 `--output-dir` 时只更新本轮处理的 session，不删除其他文件。
+
+默认省略工具调用。`--include-tool-calls` 会把可识别的调用和结果合并到同一个 `Tool` 段落，删除稳定的协议包装以提高可读性；无法安全标准化时回退到完整原生 payload。模式变化时会重写已有 Markdown。
 
 ![WayLog Pull Demo](demo/pull.gif)
 

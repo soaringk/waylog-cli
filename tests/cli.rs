@@ -25,7 +25,20 @@ fn write_qoder_session(path: &Path, session_id: &str, project: &Path, response: 
             "cwd": project,
             "timestamp": "2026-07-20T07:00:01.000Z",
             "uuid": format!("{session_id}-assistant"),
-            "message": {"role": "assistant", "content": [{"type": "text", "text": response}]}
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": response},
+                {"type": "tool_use", "id": format!("{session_id}-tool"), "name": "Read", "input": {"file_path": "src/main.rs"}}
+            ]}
+        }),
+        serde_json::json!({
+            "type": "user",
+            "sessionId": session_id,
+            "cwd": project,
+            "timestamp": "2026-07-20T07:00:02.000Z",
+            "uuid": format!("{session_id}-tool-result"),
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": format!("{session_id}-tool"), "content": "file contents"}
+            ]}
         }),
     ];
     std::fs::write(
@@ -157,6 +170,31 @@ fn source_parses_one_file_or_a_provider_tree_without_local_discovery() {
             .unwrap()
             .contains("second response")
     }));
+
+    let output = run_waylog(
+        current_dir.path(),
+        &[
+            "pull",
+            "--provider",
+            "qoder",
+            "--source",
+            first.to_str().unwrap(),
+            "--output-dir",
+            single_output.to_str().unwrap(),
+            "--include-tool-calls",
+        ],
+    );
+    assert!(output.status.success());
+    let markdown_with_tools = std::fs::read_to_string(&first_markdown).unwrap();
+    assert_eq!(markdown_with_tools.matches("## 🛠️ Tool").count(), 1);
+    assert!(!markdown_with_tools.contains("```json"));
+    assert!(markdown_with_tools.contains("src/main.rs"));
+    assert!(markdown_with_tools.contains("file contents"));
+
+    pull_qoder_source(current_dir.path(), &first, &single_output);
+    assert!(!std::fs::read_to_string(&first_markdown)
+        .unwrap()
+        .contains("## 🛠️ Tool"));
 
     let batch_output = current_dir.path().join("batch-output");
     let output = pull_qoder_source(current_dir.path(), &source_dir, &batch_output);

@@ -110,8 +110,8 @@ impl Provider for GeminiProvider {
             session_id: session_data.session_id,
             provider: self.name().to_string(),
             project_path,
-            started_at,
-            updated_at,
+            started_at: Some(started_at),
+            updated_at: Some(updated_at),
             messages,
         })
     }
@@ -196,8 +196,8 @@ impl GeminiProvider {
             session_id: header.session_id,
             provider: self.name().to_string(),
             project_path,
-            started_at,
-            updated_at,
+            started_at: Some(started_at),
+            updated_at: Some(updated_at),
             messages,
         })
     }
@@ -235,14 +235,14 @@ impl GeminiProvider {
 
         Ok(Some(ChatMessage {
             id: msg.id,
-            timestamp,
+            timestamp: Some(timestamp),
             role,
             content,
             metadata: MessageMetadata {
                 model: msg.model,
                 tokens,
-                tool_calls: Vec::new(),
                 thoughts,
+                ..Default::default()
             },
         }))
     }

@@ -73,8 +73,7 @@ async fn run_agent(
     tracing::info!("Chat history will be saved to: {}", waylog_dir.display());
 
     // Create session tracker
-    let tracker =
-        Arc::new(session::SessionTracker::new(tracking_root.clone(), provider.clone()).await?);
+    let tracker = Arc::new(session::SessionTracker::new(&waylog_dir, provider.name()).await?);
 
     // Create file watcher
     let watcher = watcher::FileWatcher::new(
@@ -161,17 +160,15 @@ async fn run_agent(
             } => {
                 tracing::info!("Received SIGINT (Ctrl+C), cleaning up...");
                 process::terminate_child(&mut child).await;
-                let status = child.wait().await?;
+                child.wait().await?;
                 cleanup::cleanup_and_sync(
                     &watcher_handle,
-                    &mut child,
                     &tracker,
                     &provider,
                     &target_project_path,
                     &waylog_dir,
-                    Some(status),
                 )
-                .await?;
+                .await;
                 // Standard exit code for SIGINT: 130
                 return Err(WaylogError::ChildProcessFailed(130));
             }
@@ -185,34 +182,29 @@ async fn run_agent(
             } => {
                 tracing::info!("Received SIGTERM, cleaning up...");
                 process::terminate_child(&mut child).await;
-                let status = child.wait().await?;
+                child.wait().await?;
                 cleanup::cleanup_and_sync(
                     &watcher_handle,
-                    &mut child,
                     &tracker,
                     &provider,
                     &target_project_path,
                     &waylog_dir,
-                    Some(status),
                 )
-                .await?;
+                .await;
                 // Standard exit code for SIGTERM: 143
                 return Err(WaylogError::ChildProcessFailed(143));
             }
             // Child process exited normally
             status_result = child.wait() => {
                 let status = status_result?;
-                watcher_handle.abort();
                 cleanup::cleanup_and_sync(
                     &watcher_handle,
-                    &mut child,
                     &tracker,
                     &provider,
                     &target_project_path,
                     &waylog_dir,
-                    Some(status),
                 )
-                .await?;
+                .await;
                 Some(status)
             }
         }
@@ -235,17 +227,14 @@ async fn run_agent(
                 if result.is_none() {
                     // Stream closed, wait for child process to exit normally
                     let status = child.wait().await?;
-                    watcher_handle.abort();
                     cleanup::cleanup_and_sync(
                         &watcher_handle,
-                        &mut child,
                         &tracker,
                         &provider,
                         &target_project_path,
                         &waylog_dir,
-                        Some(status),
                     )
-                    .await?;
+                    .await;
                     if !status.success() {
                         let exit_code = status.code().unwrap_or(1);
                         return Err(WaylogError::ChildProcessFailed(exit_code));
@@ -255,34 +244,29 @@ async fn run_agent(
 
                 tracing::info!("Received Ctrl+C, cleaning up...");
                 process::terminate_child(&mut child).await;
-                let status = child.wait().await?;
+                child.wait().await?;
                 cleanup::cleanup_and_sync(
                     &watcher_handle,
-                    &mut child,
                     &tracker,
                     &provider,
                     &target_project_path,
                     &waylog_dir,
-                    Some(status),
                 )
-                .await?;
+                .await;
                 // Standard exit code for Ctrl+C: 130 (same as Unix SIGINT)
                 return Err(WaylogError::ChildProcessFailed(130));
             }
             // Child process exited normally
             status_result = child.wait() => {
                 let status = status_result?;
-                watcher_handle.abort();
                 cleanup::cleanup_and_sync(
                     &watcher_handle,
-                    &mut child,
                     &tracker,
                     &provider,
                     &target_project_path,
                     &waylog_dir,
-                    Some(status),
                 )
-                .await?;
+                .await;
                 Some(status)
             }
         }
@@ -314,7 +298,6 @@ mod tests {
     use std::collections::HashMap;
     use std::path::Path;
     use tempfile::TempDir;
-    use tokio::process::Command as TokioCommand;
 
     // Mock Provider for testing
     struct MockProvider {
@@ -376,7 +359,7 @@ mod tests {
         for i in 0..message_count {
             messages.push(ChatMessage {
                 id: format!("msg-{}", i),
-                timestamp: now,
+                timestamp: Some(now),
                 role: if i % 2 == 0 {
                     MessageRole::User
                 } else {
@@ -391,8 +374,8 @@ mod tests {
             session_id: session_id.to_string(),
             provider: "test".to_string(),
             project_path: PathBuf::from("/test/project"),
-            started_at: now,
-            updated_at: now,
+            started_at: Some(now),
+            updated_at: Some(now),
             messages,
         }
     }
@@ -413,7 +396,7 @@ mod tests {
 
         // Create tracker
         let tracker = Arc::new(
-            session::SessionTracker::new(project_path.clone(), provider.clone())
+            session::SessionTracker::new(&waylog_dir, provider.name())
                 .await
                 .unwrap(),
         );
@@ -423,32 +406,14 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         });
 
-        // Create a simple child process that exits immediately
-        // On Windows, echo is a shell built-in, so use cmd /C
-        #[cfg(windows)]
-        let mut child = TokioCommand::new("cmd")
-            .args(["/C", "echo", "test"])
-            .spawn()
-            .unwrap();
-        #[cfg(not(windows))]
-        let mut child = TokioCommand::new("echo").arg("test").spawn().unwrap();
-
-        // Wait for child to exit
-        let _ = child.wait().await;
-
-        // Call cleanup_and_sync
-        let result = cleanup::cleanup_and_sync(
+        cleanup::cleanup_and_sync(
             &watcher_handle,
-            &mut child,
             &tracker,
             &provider,
             &project_path,
             &waylog_dir,
-            None,
         )
         .await;
-
-        assert!(result.is_ok());
 
         // Verify that markdown file was created
         let markdown_files: Vec<_> = std::fs::read_dir(&waylog_dir)
@@ -459,129 +424,5 @@ mod tests {
 
         // Should have created a markdown file with the messages
         assert!(!markdown_files.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_and_sync_with_no_new_messages() {
-        let temp_dir = TempDir::new().unwrap();
-        let project_path = temp_dir.path().to_path_buf();
-        let waylog_dir = utils::path::get_waylog_dir(&project_path);
-        utils::path::ensure_dir_exists(&waylog_dir).unwrap();
-
-        // Create mock provider with no latest session
-        let mock_provider = MockProvider::new("test");
-        let provider: Arc<dyn providers::base::Provider> = Arc::new(mock_provider);
-
-        // Create tracker
-        let tracker = Arc::new(
-            session::SessionTracker::new(project_path.clone(), provider.clone())
-                .await
-                .unwrap(),
-        );
-
-        // Create watcher handle
-        let watcher_handle = tokio::spawn(async {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        });
-
-        // Create child process (cross-platform)
-        #[cfg(windows)]
-        let mut child = TokioCommand::new("cmd")
-            .args(["/C", "echo", "test"])
-            .spawn()
-            .unwrap();
-        #[cfg(not(windows))]
-        let mut child = TokioCommand::new("echo").arg("test").spawn().unwrap();
-        let _ = child.wait().await;
-
-        // Call cleanup_and_sync - should succeed even with no messages
-        let result = cleanup::cleanup_and_sync(
-            &watcher_handle,
-            &mut child,
-            &tracker,
-            &provider,
-            &project_path,
-            &waylog_dir,
-            None,
-        )
-        .await;
-
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_and_sync_handles_errors_gracefully() {
-        let temp_dir = TempDir::new().unwrap();
-        let project_path = temp_dir.path().to_path_buf();
-        let waylog_dir = utils::path::get_waylog_dir(&project_path);
-        utils::path::ensure_dir_exists(&waylog_dir).unwrap();
-
-        // Create mock provider that returns error for find_latest_session
-        struct ErrorProvider;
-
-        #[async_trait]
-        impl providers::base::Provider for ErrorProvider {
-            fn name(&self) -> &str {
-                "error"
-            }
-
-            async fn find_latest_session(&self, _project_path: &Path) -> Result<Option<PathBuf>> {
-                Err(crate::error::WaylogError::Io(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "Permission denied",
-                )))
-            }
-
-            async fn parse_session(&self, _file_path: &Path) -> Result<ChatSession> {
-                unreachable!()
-            }
-
-            async fn get_all_sessions(&self, _project_path: &Path) -> Result<Vec<PathBuf>> {
-                Ok(vec![])
-            }
-
-            fn has_history(&self) -> bool {
-                true
-            }
-
-            fn run_command(&self) -> Option<&str> {
-                Some("error")
-            }
-        }
-
-        let provider: Arc<dyn providers::base::Provider> = Arc::new(ErrorProvider);
-        let tracker = Arc::new(
-            session::SessionTracker::new(project_path.clone(), provider.clone())
-                .await
-                .unwrap(),
-        );
-
-        let watcher_handle = tokio::spawn(async {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        });
-
-        #[cfg(windows)]
-        let mut child = TokioCommand::new("cmd")
-            .args(["/C", "echo", "test"])
-            .spawn()
-            .unwrap();
-        #[cfg(not(windows))]
-        let mut child = TokioCommand::new("echo").arg("test").spawn().unwrap();
-        let _ = child.wait().await;
-
-        // Should not panic even when provider returns error
-        let result = cleanup::cleanup_and_sync(
-            &watcher_handle,
-            &mut child,
-            &tracker,
-            &provider,
-            &project_path,
-            &waylog_dir,
-            None,
-        )
-        .await;
-
-        // Should succeed despite errors (errors are logged but don't stop cleanup)
-        assert!(result.is_ok());
     }
 }

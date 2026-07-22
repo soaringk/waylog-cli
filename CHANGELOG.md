@@ -2,6 +2,12 @@
 
 User-facing features and critical fixes are documented here from version 0.3.0 onward.
 
+## Next
+
+- Added `--include-tool-calls` to render tool requests and results in readable grouped Tool sections, with complete native payload fallback when normalization is unsafe.
+- Preserved provider-recorded conversation content, represented missing timestamps as `null`, and isolated merged-output sync state by provider and output mode.
+- Fixed Codex latest-session discovery so long-running sessions are found regardless of their creation-date directory.
+
 ## [0.3.2] - 2026-07-22
 
 - Anchored pull to the current project: output defaults to `.waylog/history/`, recursive recovery adds visible descendants, and repeated writes preserve unrelated files.

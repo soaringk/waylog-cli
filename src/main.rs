@@ -78,6 +78,7 @@ async fn main() {
                 session,
                 source,
                 output_dir,
+                include_tool_calls,
             } => {
                 handle_pull(
                     PullOptions {
@@ -88,6 +89,7 @@ async fn main() {
                         session_id: session,
                         source,
                         output_dir,
+                        include_tool_calls,
                         verbose: cli.verbose,
                     },
                     project_root,

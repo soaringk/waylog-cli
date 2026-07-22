@@ -93,9 +93,9 @@ impl OpenCodeProvider {
         &self,
         connection: &Connection,
         message_id: String,
-        fallback_time: i64,
+        fallback_time: Option<i64>,
         data: String,
-    ) -> Result<Option<ChatMessage>> {
+    ) -> Result<Vec<ChatMessage>> {
         let info: Value = serde_json::from_str(&data)?;
         let mut parts = Vec::new();
         let mut statement = connection
@@ -113,34 +113,30 @@ impl OpenCodeProvider {
     fn message_from_parts(
         &self,
         message_id: String,
-        fallback_time: i64,
+        fallback_time: Option<i64>,
         info: Value,
         parts: Vec<Value>,
-    ) -> Result<Option<ChatMessage>> {
+    ) -> Result<Vec<ChatMessage>> {
         let role = match info.get("role").and_then(Value::as_str) {
             Some("user") => MessageRole::User,
             Some("assistant") => MessageRole::Assistant,
-            _ => return Ok(None),
+            _ => return Ok(Vec::new()),
         };
 
-        let mut text = Vec::new();
         let mut thoughts = Vec::new();
         let mut tool_calls = Vec::new();
 
-        for part in parts {
+        for part in &parts {
             match part.get("type").and_then(Value::as_str) {
-                Some("text") if part.get("ignored").and_then(Value::as_bool) != Some(true) => {
-                    if let Some(value) = non_empty_string(part.get("text")) {
-                        text.push(value.to_string());
-                    }
-                }
                 Some("reasoning") => {
                     if let Some(value) = non_empty_string(part.get("text")) {
                         thoughts.push(value.to_string());
                     }
                 }
-                Some("tool") => {
-                    if let Some(value) = non_empty_string(part.get("tool")) {
+                _ if is_tool_payload(part) => {
+                    if let Some(value) =
+                        non_empty_string(part.get("tool").or_else(|| part.get("name")))
+                    {
                         tool_calls.push(value.to_string());
                     }
                 }
@@ -148,16 +144,11 @@ impl OpenCodeProvider {
             }
         }
 
-        let content = text.join("\n\n");
-        if content.is_empty() {
-            return Ok(None);
-        }
-
         let timestamp_ms = info
             .pointer("/time/created")
             .and_then(Value::as_i64)
-            .unwrap_or(fallback_time);
-        let timestamp = datetime_from_millis(timestamp_ms)?;
+            .or(fallback_time);
+        let timestamp = timestamp_ms.and_then(datetime_from_millis);
         let model_id = info
             .pointer("/model/modelID")
             .or_else(|| info.get("modelID"))
@@ -182,18 +173,55 @@ impl OpenCodeProvider {
             })
         });
 
-        Ok(Some(ChatMessage {
-            id: message_id,
-            timestamp,
-            role,
-            content,
-            metadata: MessageMetadata {
-                model,
-                tokens,
-                tool_calls,
-                thoughts,
-            },
-        }))
+        let mut messages = Vec::new();
+        let mut text_index = 0;
+        let mut tool_index = 0;
+        for part in parts {
+            match part.get("type").and_then(Value::as_str) {
+                Some("text") if part.get("ignored").and_then(Value::as_bool) != Some(true) => {
+                    let Some(content) = non_empty_string(part.get("text")) else {
+                        continue;
+                    };
+                    messages.push(ChatMessage {
+                        id: format!("{message_id}:text:{text_index}"),
+                        timestamp,
+                        role,
+                        content: content.to_string(),
+                        metadata: MessageMetadata {
+                            model: model.clone(),
+                            tokens: if text_index == 0 {
+                                tokens.clone()
+                            } else {
+                                None
+                            },
+                            tool_calls: if text_index == 0 {
+                                tool_calls.clone()
+                            } else {
+                                Vec::new()
+                            },
+                            thoughts: if text_index == 0 {
+                                thoughts.clone()
+                            } else {
+                                Vec::new()
+                            },
+                            ..Default::default()
+                        },
+                    });
+                    text_index += 1;
+                }
+                _ if is_tool_payload(&part) => {
+                    messages.push(ChatMessage::tool(
+                        format!("{message_id}:tool:{tool_index}"),
+                        timestamp,
+                        part,
+                    ));
+                    tool_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        Ok(messages)
     }
 
     async fn parse_export(&self, path: &Path) -> Result<ChatSession> {
@@ -204,16 +232,14 @@ impl OpenCodeProvider {
         let session_id = info.get("id").and_then(Value::as_str).ok_or_else(|| {
             WaylogError::PathError(format!("Invalid OpenCode export: {}", path.display()))
         })?;
-        let started_at = datetime_from_millis(
-            info.pointer("/time/created")
-                .and_then(Value::as_i64)
-                .unwrap_or_default(),
-        )?;
-        let updated_at = datetime_from_millis(
-            info.pointer("/time/updated")
-                .and_then(Value::as_i64)
-                .unwrap_or_else(|| started_at.timestamp_millis()),
-        )?;
+        let started_at = info
+            .pointer("/time/created")
+            .and_then(Value::as_i64)
+            .and_then(datetime_from_millis);
+        let updated_at = info
+            .pointer("/time/updated")
+            .and_then(Value::as_i64)
+            .and_then(datetime_from_millis);
 
         let mut messages = Vec::new();
         for message in export
@@ -234,18 +260,18 @@ impl OpenCodeProvider {
             };
             let fallback_time = message_info
                 .pointer("/time/created")
-                .and_then(Value::as_i64)
-                .unwrap_or_else(|| started_at.timestamp_millis());
+                .and_then(Value::as_i64);
             let parts = message
                 .get("parts")
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            if let Some(message) =
-                self.message_from_parts(message_id, fallback_time, message_info, parts)?
-            {
-                messages.push(message);
-            }
+            messages.extend(self.message_from_parts(
+                message_id,
+                fallback_time,
+                message_info,
+                parts,
+            )?);
         }
 
         Ok(ChatSession {
@@ -340,19 +366,20 @@ impl Provider for OpenCodeProvider {
         let mut messages = Vec::new();
         for row in rows {
             let (message_id, time_created, data) = row.map_err(sqlite_error)?;
-            if let Some(message) =
-                self.parse_message(&connection, message_id, time_created, data)?
-            {
-                messages.push(message);
-            }
+            messages.extend(self.parse_message(
+                &connection,
+                message_id,
+                Some(time_created),
+                data,
+            )?);
         }
 
         Ok(ChatSession {
             session_id: session_id.to_string(),
             provider: self.name().to_string(),
             project_path: PathBuf::from(session.0),
-            started_at: datetime_from_millis(session.1)?,
-            updated_at: datetime_from_millis(session.2)?,
+            started_at: datetime_from_millis(session.1),
+            updated_at: datetime_from_millis(session.2),
             messages,
         })
     }
@@ -376,7 +403,6 @@ impl Provider for OpenCodeProvider {
 fn non_empty_string(value: Option<&Value>) -> Option<&str> {
     value
         .and_then(Value::as_str)
-        .map(str::trim)
         .filter(|value| !value.is_empty())
 }
 
@@ -387,10 +413,8 @@ fn json_u32(value: Option<&Value>) -> u32 {
         .min(u32::MAX as u64) as u32
 }
 
-fn datetime_from_millis(value: i64) -> Result<DateTime<Utc>> {
-    DateTime::from_timestamp_millis(value).ok_or_else(|| {
-        WaylogError::Internal(format!("Invalid OpenCode millisecond timestamp: {value}"))
-    })
+fn datetime_from_millis(value: i64) -> Option<DateTime<Utc>> {
+    DateTime::from_timestamp_millis(value)
 }
 
 fn sqlite_error(error: rusqlite::Error) -> WaylogError {
@@ -476,7 +500,7 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO part VALUES (?1, ?2, ?3, ?4)",
-                params!["prt_3", "msg_assistant", "ses_test", r#"{"type":"tool","tool":"read","callID":"call_1","state":{"status":"completed"}}"#],
+                params!["prt_3", "msg_assistant", "ses_test", r#"{"type":"tool","tool":"read","callID":"call_1","state":{"status":"completed","input":{"filePath":"src/main.rs"},"output":"file contents"}}"#],
             )
             .unwrap();
         connection
@@ -518,19 +542,25 @@ mod tests {
 
         assert_eq!(session.session_id, "ses_test");
         assert_eq!(session.project_path, project_path);
-        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages.len(), 3);
         assert_eq!(session.messages[0].content, "Implement the feature");
-        assert_eq!(session.messages[1].content, "Done");
-        assert_eq!(session.messages[1].metadata.tool_calls, vec!["read"]);
+        assert_eq!(session.messages[1].role, MessageRole::Tool);
         assert_eq!(
-            session.messages[1].metadata.thoughts,
+            session.messages[1].metadata.tool_call_id.as_deref(),
+            Some("call_1")
+        );
+        assert!(session.messages[1].content.contains("src/main.rs"));
+        assert!(session.messages[1].content.contains("file contents"));
+        assert_eq!(session.messages[2].content, "Done");
+        assert_eq!(
+            session.messages[2].metadata.thoughts,
             vec!["Inspect the existing design"]
         );
         assert_eq!(
-            session.messages[1].metadata.model.as_deref(),
+            session.messages[2].metadata.model.as_deref(),
             Some("anthropic/claude-test")
         );
-        let tokens = session.messages[1].metadata.tokens.as_ref().unwrap();
+        let tokens = session.messages[2].metadata.tokens.as_ref().unwrap();
         assert_eq!((tokens.input, tokens.output, tokens.cached), (12, 8, 3));
     }
 
@@ -580,7 +610,7 @@ mod tests {
                     },
                     "parts": [
                         {"type": "reasoning", "text": "Inspect the existing design"},
-                        {"type": "tool", "tool": "read"},
+                        {"type": "tool", "tool": "read", "callID": "call_1", "state": {"input": {"filePath": "src/main.rs"}, "output": "file contents"}},
                         {"type": "text", "text": "Done"}
                     ]
                 }
@@ -593,12 +623,18 @@ mod tests {
 
         assert_eq!(session.session_id, "ses_export");
         assert_eq!(session.project_path, project_path);
-        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages.len(), 3);
         assert_eq!(session.messages[0].content, "Implement the feature");
-        assert_eq!(session.messages[1].content, "Done");
-        assert_eq!(session.messages[1].metadata.tool_calls, vec!["read"]);
+        assert_eq!(session.messages[1].role, MessageRole::Tool);
         assert_eq!(
-            session.messages[1].metadata.thoughts,
+            session.messages[1].metadata.tool_call_id.as_deref(),
+            Some("call_1")
+        );
+        assert!(session.messages[1].content.contains("src/main.rs"));
+        assert!(session.messages[1].content.contains("file contents"));
+        assert_eq!(session.messages[2].content, "Done");
+        assert_eq!(
+            session.messages[2].metadata.thoughts,
             vec!["Inspect the existing design"]
         );
     }

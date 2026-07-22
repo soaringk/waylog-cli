@@ -60,7 +60,6 @@ async-trait = "0.1"
 
 # UUID generation
 uuid = { version = "1.6", features = ["v4"] }
-regex = "1.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]

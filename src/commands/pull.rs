@@ -18,6 +18,7 @@ pub struct PullOptions {
     pub session_id: Option<String>,
     pub source: Option<PathBuf>,
     pub output_dir: Option<PathBuf>,
+    pub include_tool_calls: bool,
     pub verbose: bool,
 }
 
@@ -34,6 +35,7 @@ pub async fn handle_pull(
         session_id,
         source,
         output_dir,
+        include_tool_calls,
         verbose,
     } = options;
     output.pull_start(&project_path, recursive, include_hidden)?;
@@ -67,15 +69,12 @@ pub async fn handle_pull(
             continue;
         }
 
-        let tracker = Arc::new(
-            session::SessionTracker::new_with_history_dir(history_dir.clone(), provider.clone())
-                .await?,
-        );
-        let synchronizer = synchronizer::Synchronizer::new_with_history_dir(
+        let tracker = Arc::new(session::SessionTracker::new(&history_dir, provider.name()).await?);
+        let synchronizer = synchronizer::Synchronizer::new(
             provider.clone(),
             history_dir.clone(),
-            project_path.clone(),
-            tracker.clone(),
+            tracker,
+            include_tool_calls,
         );
 
         let session_paths = if let Some(source) = &source {
@@ -95,7 +94,7 @@ pub async fn handle_pull(
 
         let results = synchronizer
             .sync_paths(session_paths, force || source.is_some())
-            .await?;
+            .await;
         total_tasks += results.len();
 
         output.provider_header(provider.name(), results.len())?;
@@ -284,11 +283,11 @@ mod tests {
                 session_id: file_path.display().to_string(),
                 provider: self.name().to_string(),
                 project_path: PathBuf::from("/project"),
-                started_at: Utc::now(),
-                updated_at: Utc::now(),
+                started_at: Some(Utc::now()),
+                updated_at: Some(Utc::now()),
                 messages: vec![ChatMessage {
                     id: "msg-1".to_string(),
-                    timestamp: Utc::now(),
+                    timestamp: Some(Utc::now()),
                     role: MessageRole::User,
                     content: "hello".to_string(),
                     metadata: MessageMetadata::default(),

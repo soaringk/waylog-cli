@@ -1,4 +1,3 @@
-pub mod state;
-pub mod tracker;
+mod tracker;
 
-pub use tracker::SessionTracker;
+pub(crate) use tracker::SessionTracker;

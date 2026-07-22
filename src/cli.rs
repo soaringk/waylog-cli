@@ -79,6 +79,10 @@ pub enum Commands {
         /// Write Markdown directly to this directory (default: .waylog/history)
         #[arg(long, value_name = "DIR")]
         output_dir: Option<std::path::PathBuf>,
+
+        /// Include tool calls and results in Markdown
+        #[arg(long)]
+        include_tool_calls: bool,
     },
 }
 
@@ -129,5 +133,17 @@ mod tests {
     fn hidden_directories_require_recursive_mode() {
         assert!(Cli::try_parse_from(["waylog", "pull", "--hidden"]).is_err());
         assert!(Cli::try_parse_from(["waylog", "pull", "--recursive", "--hidden"]).is_ok());
+    }
+
+    #[test]
+    fn tool_calls_are_opt_in() {
+        let cli = Cli::try_parse_from(["waylog", "pull", "--include-tool-calls"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Pull {
+                include_tool_calls: true,
+                ..
+            }
+        ));
     }
 }
