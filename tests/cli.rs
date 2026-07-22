@@ -213,7 +213,14 @@ fn pull_uses_the_invocation_waylog_and_reports_its_history_directory() {
     assert!(output.status.success());
     assert_eq!(std::fs::read_dir(&history_dir).unwrap().count(), 1);
     assert!(!workspace.path().join(".waylog/history").exists());
-    assert!(String::from_utf8(output.stdout)
+    let reported_history = String::from_utf8(output.stdout)
         .unwrap()
-        .contains(&format!("History: {}", history_dir.display())));
+        .lines()
+        .find_map(|line| line.strip_prefix("History: "))
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        Path::new(&reported_history).canonicalize().unwrap(),
+        history_dir.canonicalize().unwrap()
+    );
 }
