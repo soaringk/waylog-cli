@@ -7,8 +7,8 @@ WayLog is a local-first Rust CLI that turns coding-agent histories into readable
 ## Modes
 
 - `waylog run` launches one agent and keeps its latest session synchronized while the process is active.
-- `waylog pull` recovers sessions associated with the current project.
-- `waylog pull --recursive` treats the visible current directory tree as one workspace recovery scope and aggregates descendant sessions into the resolved tracking root, which may be an ancestor of the invocation directory; `--hidden` expands that scope, and neither mode creates independent outputs for nested projects.
+- `waylog pull` recovers sessions associated with the invocation directory and writes to its `.waylog/history/`.
+- `waylog pull --recursive` adds visible descendant projects to that recovery scope, `--hidden` includes hidden descendants, and `--output-dir` explicitly replaces the destination.
 - `waylog pull --provider <provider> --session <id>` targets one session in local provider history and may write to a caller-managed directory.
 - `--source` parses supplied provider artifacts or a downloaded provider directory tree without local session discovery, allowing collectors and a centralized parser to remain separate while preserving upload grouping.
 

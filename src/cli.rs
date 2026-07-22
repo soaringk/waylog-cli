@@ -49,11 +49,11 @@ pub enum Commands {
         #[arg(short, long)]
         force: bool,
 
-        /// Traverse subdirectories and aggregate sessions into the resolved tracking root
+        /// Include descendant projects in one output
         #[arg(short, long)]
         recursive: bool,
 
-        /// Include hidden directories when using --recursive
+        /// Include hidden descendants when using --recursive
         #[arg(long, visible_alias = "hiden", requires = "recursive")]
         hidden: bool,
 
@@ -76,8 +76,8 @@ pub enum Commands {
         )]
         source: Option<std::path::PathBuf>,
 
-        /// Write Markdown files directly to this directory
-        #[arg(long, value_name = "DIR", requires = "target")]
+        /// Write Markdown directly to this directory (default: .waylog/history)
+        #[arg(long, value_name = "DIR")]
         output_dir: Option<std::path::PathBuf>,
     },
 }
@@ -87,8 +87,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn output_directory_requires_one_session() {
-        assert!(Cli::try_parse_from(["waylog", "pull", "--output-dir", "/tmp/out"]).is_err());
+    fn output_directory_is_available_for_standard_and_recursive_pulls() {
+        assert!(Cli::try_parse_from(["waylog", "pull", "--output-dir", "/tmp/out"]).is_ok());
+        assert!(Cli::try_parse_from(
+            ["waylog", "pull", "--recursive", "--output-dir", "/tmp/out",]
+        )
+        .is_ok());
     }
 
     #[test]
@@ -119,5 +123,11 @@ mod tests {
             "/tmp/raw",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn hidden_directories_require_recursive_mode() {
+        assert!(Cli::try_parse_from(["waylog", "pull", "--hidden"]).is_err());
+        assert!(Cli::try_parse_from(["waylog", "pull", "--recursive", "--hidden"]).is_ok());
     }
 }

@@ -39,7 +39,7 @@ fn write_qoder_session(path: &Path, session_id: &str, project: &Path, response: 
     .unwrap();
 }
 
-fn pull_qoder_source(current_dir: &Path, source: &Path, output_dir: &Path) {
+fn pull_qoder_source(current_dir: &Path, source: &Path, output_dir: &Path) -> Output {
     let output = run_waylog(
         current_dir,
         &[
@@ -50,7 +50,6 @@ fn pull_qoder_source(current_dir: &Path, source: &Path, output_dir: &Path) {
             source.to_str().unwrap(),
             "--output-dir",
             output_dir.to_str().unwrap(),
-            "--quiet",
         ],
     );
     assert!(
@@ -58,6 +57,7 @@ fn pull_qoder_source(current_dir: &Path, source: &Path, output_dir: &Path) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    output
 }
 
 #[test]
@@ -136,20 +136,33 @@ fn source_parses_one_file_or_a_provider_tree_without_local_discovery() {
         "updated response",
     );
     pull_qoder_source(current_dir.path(), &first, &single_output);
-    let markdown = std::fs::read_to_string(
-        std::fs::read_dir(&single_output)
+    let first_markdown = std::fs::read_dir(&single_output)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let first_content = std::fs::read_to_string(&first_markdown).unwrap();
+    assert!(first_content.contains("updated response"));
+    assert!(!first_content.contains("first response"));
+
+    pull_qoder_source(current_dir.path(), &second, &single_output);
+    assert_eq!(std::fs::read_dir(&single_output).unwrap().count(), 2);
+    assert_eq!(
+        std::fs::read_to_string(&first_markdown).unwrap(),
+        first_content
+    );
+    assert!(std::fs::read_dir(&single_output).unwrap().any(|entry| {
+        std::fs::read_to_string(entry.unwrap().path())
             .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path(),
-    )
-    .unwrap();
-    assert!(markdown.contains("updated response"));
-    assert!(!markdown.contains("first response"));
+            .contains("second response")
+    }));
 
     let batch_output = current_dir.path().join("batch-output");
-    pull_qoder_source(current_dir.path(), &source_dir, &batch_output);
+    let output = pull_qoder_source(current_dir.path(), &source_dir, &batch_output);
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains(&format!("History: {}", batch_output.display())));
     assert_eq!(std::fs::read_dir(batch_output).unwrap().count(), 2);
 
     let empty_source = current_dir.path().join("empty");
@@ -174,4 +187,33 @@ fn source_parses_one_file_or_a_provider_tree_without_local_discovery() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn pull_uses_the_invocation_waylog_and_reports_its_history_directory() {
+    let workspace = tempfile::tempdir().unwrap();
+    let project = workspace.path().join("project");
+    let source = workspace.path().join("session.jsonl");
+    std::fs::create_dir_all(workspace.path().join(".waylog")).unwrap();
+    std::fs::create_dir_all(project.join(".waylog")).unwrap();
+    write_qoder_session(&source, "session-current", &project, "response");
+
+    let output = run_waylog(
+        &project,
+        &[
+            "pull",
+            "--provider",
+            "qoder",
+            "--source",
+            source.to_str().unwrap(),
+        ],
+    );
+    let history_dir = project.canonicalize().unwrap().join(".waylog/history");
+
+    assert!(output.status.success());
+    assert_eq!(std::fs::read_dir(&history_dir).unwrap().count(), 1);
+    assert!(!workspace.path().join(".waylog/history").exists());
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains(&format!("History: {}", history_dir.display())));
 }

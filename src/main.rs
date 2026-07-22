@@ -91,7 +91,6 @@ async fn main() {
                         verbose: cli.verbose,
                     },
                     project_root,
-                    current_dir,
                     &mut output,
                 )
                 .await?;

@@ -2,6 +2,10 @@
 
 User-facing features and critical fixes are documented here from version 0.3.0 onward.
 
+## [0.3.2] - 2026-07-22
+
+- Anchored pull to the current project: output defaults to `.waylog/history/`, recursive recovery adds visible descendants, and repeated writes preserve unrelated files.
+
 ## [0.3.1] - 2026-07-21
 
 - Added project-scoped Qoder and application-wide QoderWork history parsing.
@@ -14,5 +18,6 @@ User-facing features and critical fixes are documented here from version 0.3.0 o
 - Added checksum-verified, pre-built binaries for macOS, Linux, and Windows on x64 and ARM64.
 - Added current Gemini JSONL history support and fixed cross-platform builds.
 
+[0.3.2]: https://github.com/soaringk/waylog-cli/releases/tag/v0.3.2
 [0.3.1]: https://github.com/soaringk/waylog-cli/releases/tag/v0.3.1
 [0.3.0]: https://github.com/soaringk/waylog-cli/releases/tag/v0.3.0

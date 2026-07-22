@@ -23,8 +23,7 @@ pub struct PullOptions {
 
 pub async fn handle_pull(
     options: PullOptions,
-    tracking_root: PathBuf,
-    target_project_path: PathBuf,
+    project_path: PathBuf,
     output: &mut Output,
 ) -> Result<()> {
     let PullOptions {
@@ -37,15 +36,16 @@ pub async fn handle_pull(
         output_dir,
         verbose,
     } = options;
-    output.pull_start(&target_project_path, recursive, include_hidden)?;
+    output.pull_start(&project_path, recursive, include_hidden)?;
 
     let project_paths = if recursive {
-        collect_project_paths(&target_project_path, include_hidden)
+        collect_project_paths(&project_path, include_hidden)
     } else {
-        vec![target_project_path.clone()]
+        vec![project_path.clone()]
     };
+    let history_dir =
+        output_dir.unwrap_or_else(|| crate::utils::path::get_waylog_dir(&project_path));
 
-    // Filter providers
     let provider_was_selected = provider_name.is_some();
     let providers_to_sync = if let Some(name) = provider_name {
         vec![providers::get_provider(&name)?]
@@ -67,20 +67,14 @@ pub async fn handle_pull(
             continue;
         }
 
-        // Recursive mode intentionally aggregates all descendant sessions into the
-        // resolved tracking root for this invocation. Nested `.waylog` projects are
-        // not treated as separate sync targets unless the user runs `pull` there.
-        let history_dir = output_dir
-            .clone()
-            .unwrap_or_else(|| crate::utils::path::get_waylog_dir(&tracking_root));
         let tracker = Arc::new(
             session::SessionTracker::new_with_history_dir(history_dir.clone(), provider.clone())
                 .await?,
         );
         let synchronizer = synchronizer::Synchronizer::new_with_history_dir(
             provider.clone(),
-            history_dir,
-            target_project_path.clone(),
+            history_dir.clone(),
+            project_path.clone(),
             tracker.clone(),
         );
 
@@ -88,7 +82,7 @@ pub async fn handle_pull(
             collect_source_paths(source)?
         } else if let Some(session_id) = &session_id {
             let session_path = provider
-                .find_session(&target_project_path, session_id)
+                .find_session(&project_path, session_id)
                 .await?
                 .ok_or_else(|| WaylogError::SessionNotFound {
                     provider: provider.name().to_string(),
@@ -104,7 +98,6 @@ pub async fn handle_pull(
             .await?;
         total_tasks += results.len();
 
-        // Print section header
         output.provider_header(provider.name(), results.len())?;
 
         let mut provider_uptodate = 0;
@@ -148,7 +141,7 @@ pub async fn handle_pull(
         return Err(WaylogError::AllSessionsFailed(total_failed));
     }
 
-    output.summary(total_synced, total_uptodate)?;
+    output.summary(total_synced, total_uptodate, &history_dir)?;
 
     Ok(())
 }

@@ -126,12 +126,22 @@ impl Output {
     }
 
     /// Print summary with emoji
-    pub fn summary(&mut self, synced: usize, uptodate: usize) -> io::Result<()> {
+    pub fn summary(
+        &mut self,
+        synced: usize,
+        uptodate: usize,
+        history_dir: &std::path::Path,
+    ) -> io::Result<()> {
         if !self.quiet() {
             if self.json() {
                 self.print_json_internal(
                     "summary",
-                    &format!("{} synced, {} up to date", synced, uptodate),
+                    &format!(
+                        "{} synced, {} up to date; history: {}",
+                        synced,
+                        uptodate,
+                        history_dir.display()
+                    ),
                 )?;
             } else {
                 writeln!(
@@ -141,6 +151,7 @@ impl Output {
                     synced,
                     uptodate
                 )?;
+                writeln!(self.stdout(), "History: {}", history_dir.display())?;
             }
         }
         Ok(())
