@@ -2,7 +2,7 @@
 
 User-facing features and critical fixes are documented here from version 0.3.0 onward.
 
-## Next
+## [0.3.3] - 2026-07-23
 
 - Added `--include-tool-calls` to render tool requests and results in readable grouped Tool sections, with complete native payload fallback when normalization is unsafe.
 - Preserved provider-recorded conversation content, represented missing timestamps as `null`, and isolated merged-output sync state by provider and output mode.
@@ -24,6 +24,7 @@ User-facing features and critical fixes are documented here from version 0.3.0 o
 - Added checksum-verified, pre-built binaries for macOS, Linux, and Windows on x64 and ARM64.
 - Added current Gemini JSONL history support and fixed cross-platform builds.
 
+[0.3.3]: https://github.com/soaringk/waylog-cli/releases/tag/v0.3.3
 [0.3.2]: https://github.com/soaringk/waylog-cli/releases/tag/v0.3.2
 [0.3.1]: https://github.com/soaringk/waylog-cli/releases/tag/v0.3.1
 [0.3.0]: https://github.com/soaringk/waylog-cli/releases/tag/v0.3.0
