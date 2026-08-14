@@ -137,16 +137,13 @@ impl Provider for ClaudeProvider {
 fn parse_messages(event: ClaudeEvent) -> Result<Vec<ChatMessage>> {
     let role = match event.event_type.as_str() {
         "user" => MessageRole::User,
-        "assistant" => MessageRole::Assistant,
+        "assistant" => MessageRole::Assistant(AssistantOutput::Message),
         _ => return Ok(Vec::new()),
     };
     let Some(message) = event.message else {
         return Ok(Vec::new());
     };
     let timestamp = parse_timestamp(event.timestamp.as_ref());
-    let message_id = event
-        .uuid
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let model = message.model;
     let tokens = message.usage.as_ref().map(|usage| TokenUsage {
         input: usage.input_tokens,
@@ -169,16 +166,22 @@ fn parse_messages(event: ClaudeEvent) -> Result<Vec<ChatMessage>> {
         .collect::<Vec<_>>();
     let mut messages = Vec::new();
     let mut text_index = 0;
-    let mut tool_index = 0;
 
     for item in items {
         match item.get("type").and_then(serde_json::Value::as_str) {
+            // `redacted_thinking` carries no readable text and stays absent.
+            Some("thinking") => {
+                let Some(thinking) = item.get("thinking").and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                messages.push(ChatMessage::reasoning(timestamp, thinking.to_string()));
+            }
             Some("text") => {
                 let Some(text) = item.get("text").and_then(serde_json::Value::as_str) else {
                     continue;
                 };
                 messages.push(ChatMessage {
-                    id: format!("{message_id}:text:{text_index}"),
                     timestamp,
                     role,
                     content: text.to_string(),
@@ -200,12 +203,7 @@ fn parse_messages(event: ClaudeEvent) -> Result<Vec<ChatMessage>> {
                 text_index += 1;
             }
             _ if is_tool_payload(&item) => {
-                messages.push(ChatMessage::tool(
-                    format!("{message_id}:tool:{tool_index}"),
-                    timestamp,
-                    item,
-                ));
-                tool_index += 1;
+                messages.push(ChatMessage::tool(timestamp, item));
             }
             _ => {}
         }
@@ -260,7 +258,6 @@ struct ClaudeEvent {
 
     cwd: Option<String>,
     timestamp: Option<serde_json::Value>,
-    uuid: Option<String>,
 
     #[serde(rename = "isSidechain")]
     is_sidechain: Option<bool>,
@@ -299,7 +296,6 @@ mod tests {
             session_id: Some("test-session".to_string()),
             cwd: None,
             timestamp: None,
-            uuid: None,
             is_sidechain: None,
             message: Some(ClaudeMessage {
                 content: ClaudeContent::Text(content.to_string()),
@@ -319,13 +315,51 @@ mod tests {
     }
 
     #[test]
+    fn records_thinking_blocks_in_order_and_skips_redacted_thinking() {
+        let event = ClaudeEvent {
+            event_type: "assistant".to_string(),
+            session_id: Some("test-session".to_string()),
+            cwd: None,
+            timestamp: Some(serde_json::json!("2026-07-22T00:00:00Z")),
+            is_sidechain: None,
+            message: Some(ClaudeMessage {
+                content: ClaudeContent::Array(vec![
+                    serde_json::json!({"type": "thinking", "thinking": "Weighing two designs"}),
+                    serde_json::json!({"type": "redacted_thinking", "data": "opaque"}),
+                    serde_json::json!({"type": "text", "text": "Here is the plan"}),
+                ]),
+                model: None,
+                usage: None,
+            }),
+        };
+
+        let messages = parse_messages(event).unwrap();
+
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| (message.role, message.content.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    MessageRole::Assistant(AssistantOutput::Reasoning),
+                    "Weighing two designs"
+                ),
+                (
+                    MessageRole::Assistant(AssistantOutput::Message),
+                    "Here is the plan"
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn parses_tool_use_and_result_as_tool_messages() {
         let event = ClaudeEvent {
             event_type: "assistant".to_string(),
             session_id: Some("test-session".to_string()),
             cwd: None,
             timestamp: Some(serde_json::json!("2026-07-22T00:00:00Z")),
-            uuid: Some("assistant-1".to_string()),
             is_sidechain: None,
             message: Some(ClaudeMessage {
                 content: ClaudeContent::Array(vec![
@@ -341,11 +375,20 @@ mod tests {
         let messages = parse_messages(event).unwrap();
 
         assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].role, MessageRole::Assistant);
-        assert_eq!(messages[1].role, MessageRole::Tool);
+        assert_eq!(
+            messages[0].role,
+            MessageRole::Assistant(AssistantOutput::Message)
+        );
+        assert_eq!(
+            messages[1].role,
+            MessageRole::Assistant(AssistantOutput::Tool)
+        );
         assert_eq!(messages[1].metadata.tool_call_id.as_deref(), Some("tool-1"));
         assert!(messages[1].content.contains("src/main.rs"));
-        assert_eq!(messages[2].role, MessageRole::Tool);
+        assert_eq!(
+            messages[2].role,
+            MessageRole::Assistant(AssistantOutput::Tool)
+        );
         assert_eq!(messages[2].metadata.tool_call_id.as_deref(), Some("tool-1"));
         assert!(messages[2].content.contains("file contents"));
     }

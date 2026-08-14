@@ -186,7 +186,7 @@ fn source_parses_one_file_or_a_provider_tree_without_local_discovery() {
     );
     assert!(output.status.success());
     let markdown_with_tools = std::fs::read_to_string(&first_markdown).unwrap();
-    assert_eq!(markdown_with_tools.matches("## 🛠️ Tool").count(), 1);
+    assert_eq!(markdown_with_tools.matches("### 🛠️ Tool").count(), 1);
     assert!(!markdown_with_tools.contains("```json"));
     assert!(markdown_with_tools.contains("src/main.rs"));
     assert!(markdown_with_tools.contains("file contents"));
@@ -194,7 +194,7 @@ fn source_parses_one_file_or_a_provider_tree_without_local_discovery() {
     pull_qoder_source(current_dir.path(), &first, &single_output);
     assert!(!std::fs::read_to_string(&first_markdown)
         .unwrap()
-        .contains("## 🛠️ Tool"));
+        .contains("🛠️ Tool"));
 
     let batch_output = current_dir.path().join("batch-output");
     let output = pull_qoder_source(current_dir.path(), &source_dir, &batch_output);
@@ -261,4 +261,117 @@ fn pull_uses_the_invocation_waylog_and_reports_its_history_directory() {
         Path::new(&reported_history).canonicalize().unwrap(),
         history_dir.canonicalize().unwrap()
     );
+}
+
+#[test]
+fn json_format_exports_structured_records_beside_markdown() {
+    let current_dir = tempfile::tempdir().unwrap();
+    let source_dir = current_dir.path().join("raw");
+    std::fs::create_dir(&source_dir).unwrap();
+    let session = source_dir.join("session.jsonl");
+    write_qoder_session(&session, "session-json", current_dir.path(), "the answer");
+    let output_dir = current_dir.path().join("out");
+
+    let output = run_waylog(
+        current_dir.path(),
+        &[
+            "pull",
+            "--provider",
+            "qoder",
+            "--source",
+            session.to_str().unwrap(),
+            "--output-dir",
+            output_dir.to_str().unwrap(),
+            "--format",
+            "json",
+            "--include-tool-calls",
+        ],
+    );
+    assert!(output.status.success());
+
+    let exported = std::fs::read_dir(&output_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(exported.len(), 1);
+    assert_eq!(exported[0].extension().unwrap(), "json");
+
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&exported[0]).unwrap()).unwrap();
+    assert_eq!(document["provider"], "qoder");
+    assert_eq!(document["session_id"], "session-json");
+    assert_eq!(document["include_tool_calls"], true);
+    assert_eq!(document["message_count"], 4);
+
+    let turns = document["turns"].as_array().unwrap();
+    let roles = turns
+        .iter()
+        .map(|turn| turn["role"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(roles, ["user", "assistant"]);
+    assert_eq!(turns[0]["content"], "hello");
+
+    // Every kind of model output is nested inside the one assistant turn.
+    let kinds = turns[1]["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|part| part["kind"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, ["message", "tool", "tool"]);
+    assert_eq!(turns[1]["parts"][0]["content"], "the answer");
+    assert_eq!(turns[1]["parts"][1]["tool_call_id"], "session-json-tool");
+
+    // Markdown into the same directory leaves the structured export in place.
+    pull_qoder_source(current_dir.path(), &session, &output_dir);
+    assert_eq!(std::fs::read_dir(&output_dir).unwrap().count(), 2);
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&exported[0]).unwrap()).is_ok()
+    );
+}
+
+#[test]
+fn a_pull_never_adopts_or_overwrites_a_file_it_did_not_write() {
+    for (format, unrelated_name, unrelated_body) in [
+        (
+            "markdown",
+            "my-notes.md",
+            "---\nsession_id: session-shared\n---\n\nMy own notes.\n",
+        ),
+        (
+            "json",
+            "my-notes.json",
+            "{\n  \"session_id\": \"session-shared\",\n  \"mine\": true\n}\n",
+        ),
+    ] {
+        let current_dir = tempfile::tempdir().unwrap();
+        let source_dir = current_dir.path().join("raw");
+        std::fs::create_dir(&source_dir).unwrap();
+        let session = source_dir.join("session.jsonl");
+        write_qoder_session(&session, "session-shared", current_dir.path(), "answer");
+        let output_dir = current_dir.path().join("out");
+        std::fs::create_dir(&output_dir).unwrap();
+        let unrelated = output_dir.join(unrelated_name);
+        std::fs::write(&unrelated, unrelated_body).unwrap();
+
+        let output = run_waylog(
+            current_dir.path(),
+            &[
+                "pull",
+                "--provider",
+                "qoder",
+                "--source",
+                session.to_str().unwrap(),
+                "--output-dir",
+                output_dir.to_str().unwrap(),
+                "--format",
+                format,
+            ],
+        );
+        assert!(output.status.success());
+
+        // The unrelated file survives untouched and WayLog wrote its own export beside it.
+        assert_eq!(std::fs::read_to_string(&unrelated).unwrap(), unrelated_body);
+        assert_eq!(std::fs::read_dir(&output_dir).unwrap().count(), 2);
+    }
 }

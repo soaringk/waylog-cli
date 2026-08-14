@@ -73,7 +73,14 @@ async fn run_agent(
     tracing::info!("Chat history will be saved to: {}", waylog_dir.display());
 
     // Create session tracker
-    let tracker = Arc::new(session::SessionTracker::new(&waylog_dir, provider.name()).await?);
+    let tracker = Arc::new(
+        session::SessionTracker::new(
+            &waylog_dir,
+            provider.name(),
+            crate::exporter::ExportOptions::default().format,
+        )
+        .await?,
+    );
 
     // Create file watcher
     let watcher = watcher::FileWatcher::new(
@@ -292,7 +299,9 @@ async fn run_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::base::{ChatMessage, ChatSession, MessageMetadata, MessageRole};
+    use crate::providers::base::{
+        AssistantOutput, ChatMessage, ChatSession, MessageMetadata, MessageRole,
+    };
     use async_trait::async_trait;
     use chrono::Utc;
     use std::collections::HashMap;
@@ -358,12 +367,11 @@ mod tests {
         let mut messages = Vec::new();
         for i in 0..message_count {
             messages.push(ChatMessage {
-                id: format!("msg-{}", i),
                 timestamp: Some(now),
                 role: if i % 2 == 0 {
                     MessageRole::User
                 } else {
-                    MessageRole::Assistant
+                    MessageRole::Assistant(AssistantOutput::Message)
                 },
                 content: format!("Message {}", i),
                 metadata: MessageMetadata::default(),
@@ -396,9 +404,13 @@ mod tests {
 
         // Create tracker
         let tracker = Arc::new(
-            session::SessionTracker::new(&waylog_dir, provider.name())
-                .await
-                .unwrap(),
+            session::SessionTracker::new(
+                &waylog_dir,
+                provider.name(),
+                crate::exporter::ExportFormat::Markdown,
+            )
+            .await
+            .unwrap(),
         );
 
         // Create a simple watcher handle (spawn a task that just waits)

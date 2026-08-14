@@ -2,6 +2,27 @@
 
 User-facing features and critical fixes are documented here from version 0.3.0 onward.
 
+## [Unreleased]
+
+### Added
+
+- `--format json` writes each session as one structured document with the same hierarchy the Markdown shows: a `turns` array where an assistant turn carries the `parts` the model produced. Programs no longer have to match Markdown headings, which message text can imitate. Markdown remains the default, and both formats can share an output directory.
+- Assistant reasoning is now exported. Readable reasoning steps appear as `Reasoning` records, nested with answers and tool exchanges under one `Assistant` section in the order the provider recorded them.
+
+### Fixed
+
+- Recovered assistant content that was silently dropped: Codex `reasoning` items, Claude, Qoder, and QoderWork `thinking` blocks, and OpenCode reasoning that vanished whenever a message had no text part. Encrypted or unsaved reasoning stays absent rather than being reconstructed.
+- Codex session identity now comes from a rollout's own first `session_meta`. A resumed or forked rollout replays the sessions it continues, so WayLog misread it as the replayed session and let it overwrite that session's export.
+- Codex requests stay one message instead of splitting every content item into its own message, which previously turned a single injected transcript into hundreds of `User` sections.
+- Codex `developer` messages are recorded as `System` instead of being discarded.
+- An export is rewritten whenever its recorded message count no longer matches the current parse, not only when the count grew.
+- A pull no longer adopts, and therefore no longer overwrites, a file it did not write. Restoring sync state previously treated a missing `provider` as a match, so any file in an `--output-dir` carrying a matching `session_id` could be replaced by an export.
+- A session whose provider recorded no project location is reported as `null` instead of an empty value.
+
+### Upgrading
+
+This release changes the export layout. Sessions whose message count changes are rewritten by an ordinary pull; run `waylog pull --force` once to convert histories whose count is unchanged, such as Gemini and Antigravity sessions or Claude sessions without reasoning.
+
 ## [0.3.3] - 2026-07-23
 
 - Added `--include-tool-calls` to render tool requests and results in readable grouped Tool sections, with complete native payload fallback when normalization is unsafe.

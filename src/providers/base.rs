@@ -1,14 +1,12 @@
 use crate::error::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// Represents a chat message from any AI provider
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One record of a conversation, as the provider recorded it.
+#[derive(Debug, Clone)]
 pub struct ChatMessage {
-    pub id: String,
     pub timestamp: Option<DateTime<Utc>>,
     pub role: MessageRole,
     pub content: String,
@@ -17,11 +15,10 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     /// Create a normalized provider tool record.
-    pub fn tool(id: String, timestamp: Option<DateTime<Utc>>, payload: Value) -> Self {
+    pub fn tool(timestamp: Option<DateTime<Utc>>, payload: Value) -> Self {
         Self {
-            id,
             timestamp,
-            role: MessageRole::Tool,
+            role: MessageRole::Assistant(AssistantOutput::Tool),
             content: readable_tool_payload(&payload),
             metadata: MessageMetadata {
                 tool_call_id: tool_call_id(&payload),
@@ -29,17 +26,39 @@ impl ChatMessage {
             },
         }
     }
+
+    /// Create an assistant reasoning step from the provider's readable reasoning text.
+    pub fn reasoning(timestamp: Option<DateTime<Utc>>, content: String) -> Self {
+        Self {
+            timestamp,
+            role: MessageRole::Assistant(AssistantOutput::Reasoning),
+            content,
+            metadata: MessageMetadata::default(),
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Who produced a record. Everything the model produces belongs to `Assistant`, which
+/// carries which kind of output it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageRole {
     User,
-    Assistant,
     System,
+    Assistant(AssistantOutput),
+}
+
+/// A kind of output the model produces while working on one turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistantOutput {
+    /// A readable step of the model's reasoning.
+    Reasoning,
+    /// Text the model addressed to the user.
+    Message,
+    /// A tool request or its result.
     Tool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct MessageMetadata {
     /// Model used (e.g., "claude-sonnet-4.5", "gemini-2.5-flash")
     pub model: Option<String>,
@@ -57,15 +76,15 @@ pub struct MessageMetadata {
     pub thoughts: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TokenUsage {
     pub input: u32,
     pub output: u32,
     pub cached: u32,
 }
 
-/// Represents a complete chat session
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One complete conversation, in the order the provider recorded it.
+#[derive(Debug, Clone)]
 pub struct ChatSession {
     pub session_id: String,
     pub provider: String,
@@ -277,7 +296,7 @@ mod tests {
             "arguments": "not json"
         });
 
-        let message = ChatMessage::tool("message-1".to_string(), None, payload.clone());
+        let message = ChatMessage::tool(None, payload.clone());
 
         assert_eq!(
             serde_json::from_str::<Value>(&message.content).unwrap(),
@@ -300,7 +319,7 @@ mod tests {
             }
         });
 
-        let message = ChatMessage::tool("message-1".to_string(), None, payload);
+        let message = ChatMessage::tool(None, payload);
 
         assert_eq!(
             serde_json::from_str::<Value>(&message.content).unwrap(),
@@ -323,7 +342,7 @@ mod tests {
             "arguments": {"query": "read"}
         });
 
-        let message = ChatMessage::tool("message-1".to_string(), None, payload);
+        let message = ChatMessage::tool(None, payload);
 
         assert_eq!(
             serde_json::from_str::<Value>(&message.content).unwrap(),

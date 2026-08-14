@@ -205,7 +205,7 @@ impl GeminiProvider {
     fn parse_message(&self, msg: GeminiMessage) -> Result<Option<ChatMessage>> {
         let role = match msg.message_type.as_str() {
             "user" => MessageRole::User,
-            "gemini" => MessageRole::Assistant,
+            "gemini" => MessageRole::Assistant(AssistantOutput::Message),
             _ => return Ok(None),
         };
 
@@ -234,7 +234,6 @@ impl GeminiProvider {
         });
 
         Ok(Some(ChatMessage {
-            id: msg.id,
             timestamp: Some(timestamp),
             role,
             content,

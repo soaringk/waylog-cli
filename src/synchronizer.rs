@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::exporter;
+use crate::exporter::{self, ExportOptions};
 use crate::providers::base::Provider;
 use crate::session::SessionTracker;
 use crate::utils::path;
@@ -12,7 +12,7 @@ pub(crate) struct Synchronizer {
     provider: Arc<dyn Provider>,
     history_dir: PathBuf,
     tracker: Arc<SessionTracker>,
-    include_tool_calls: bool,
+    options: ExportOptions,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -28,13 +28,13 @@ impl Synchronizer {
         provider: Arc<dyn Provider>,
         history_dir: PathBuf,
         tracker: Arc<SessionTracker>,
-        include_tool_calls: bool,
+        options: ExportOptions,
     ) -> Self {
         Self {
             provider,
             history_dir,
             tracker,
-            include_tool_calls,
+            options,
         }
     }
 
@@ -74,51 +74,55 @@ impl Synchronizer {
         }
 
         // 2. Check state
-        let (markdown_path, mut synced_count, previous_include_tool_calls) =
+        let (export_path, mut synced_count, previous_include_tool_calls) =
             if let Some(state) = self.tracker.get_session(&session.session_id).await {
                 (
-                    state.markdown_path,
+                    state.export_path,
                     state.synced_message_count,
                     state.include_tool_calls,
                 )
             } else {
                 (
-                    self.history_dir
-                        .join(session_markdown_filename(&session, self.provider.name())),
+                    self.history_dir.join(session_export_filename(
+                        &session,
+                        self.provider.name(),
+                        self.options.format,
+                    )),
                     0,
-                    self.include_tool_calls,
+                    self.options.include_tool_calls,
                 )
             };
 
         // 3. Handle force/missing file
         if force
-            || previous_include_tool_calls != self.include_tool_calls
-            || (!markdown_path.exists() && synced_count > 0)
+            || previous_include_tool_calls != self.options.include_tool_calls
+            || (!export_path.exists() && synced_count > 0)
         {
             synced_count = 0;
         }
 
-        // 4. Calculate new messages
-        let total_messages = exporter::message_count(&session, self.include_tool_calls);
-        if synced_count >= total_messages {
+        // 4. Calculate new messages. Any difference means the recorded Markdown no longer
+        // matches the session, including when parsing now produces fewer messages.
+        let total_messages = exporter::message_count(&session, self.options.include_tool_calls);
+        if synced_count == total_messages {
             return Ok(SyncStatus::UpToDate);
         }
-        let new_messages = total_messages - synced_count;
+        let new_messages = total_messages.saturating_sub(synced_count);
 
         // 5. Write to file
-        if let Some(parent) = markdown_path.parent() {
+        if let Some(parent) = export_path.parent() {
             path::ensure_dir_exists(parent)?;
         }
 
-        exporter::create_markdown_file(&markdown_path, &session, self.include_tool_calls).await?;
+        exporter::write_session(&export_path, &session, self.options).await?;
 
         // 6. Update state
         self.tracker
             .update_session(
                 session.session_id.clone(),
-                markdown_path.clone(),
+                export_path.clone(),
                 total_messages,
-                self.include_tool_calls,
+                self.options.include_tool_calls,
             )
             .await;
 
@@ -126,16 +130,17 @@ impl Synchronizer {
         debug!(
             "Synced {} messages to {}",
             new_messages,
-            markdown_path.display()
+            export_path.display()
         );
 
         Ok(SyncStatus::Synced { new_messages })
     }
 }
 
-pub(crate) fn session_markdown_filename(
+pub(crate) fn session_export_filename(
     session: &crate::providers::base::ChatSession,
     provider_name: &str,
+    format: exporter::ExportFormat,
 ) -> String {
     let slug = session
         .messages
@@ -150,7 +155,14 @@ pub(crate) fn session_markdown_filename(
         .map(|value| value.format("%Y-%m-%d_%H-%M-%SZ").to_string())
         .unwrap_or_else(|| "unknown-time".to_string());
 
-    format!("{}-{}-{}-{}.md", timestamp, provider_name, session_id, slug)
+    format!(
+        "{}-{}-{}-{}.{}",
+        timestamp,
+        provider_name,
+        session_id,
+        slug,
+        format.extension()
+    )
 }
 
 fn session_id_filename_component(session_id: &str) -> String {
@@ -168,8 +180,9 @@ fn session_id_filename_component(session_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exporter::ExportFormat;
     use crate::providers::base::{
-        ChatMessage, ChatSession, MessageMetadata, MessageRole, Provider,
+        AssistantOutput, ChatMessage, ChatSession, MessageMetadata, MessageRole, Provider,
     };
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
@@ -194,16 +207,14 @@ mod tests {
             updated_at: Some(timestamp),
             messages: vec![
                 ChatMessage {
-                    id: "msg-1".to_string(),
                     timestamp: Some(timestamp),
                     role: MessageRole::User,
                     content: "First message".to_string(),
                     metadata: MessageMetadata::default(),
                 },
                 ChatMessage {
-                    id: "msg-2".to_string(),
                     timestamp: Some(timestamp),
-                    role: MessageRole::Assistant,
+                    role: MessageRole::Assistant(AssistantOutput::Message),
                     content: "Second message".to_string(),
                     metadata: MessageMetadata::default(),
                 },
@@ -220,7 +231,6 @@ mod tests {
             started_at: None,
             updated_at: None,
             messages: vec![ChatMessage {
-                id: "message-1".to_string(),
                 timestamp: None,
                 role: MessageRole::User,
                 content: "First message".to_string(),
@@ -229,7 +239,7 @@ mod tests {
         };
 
         assert_eq!(
-            session_markdown_filename(&session, "mock"),
+            session_export_filename(&session, "mock", ExportFormat::Markdown),
             "unknown-time-mock-session-1-first-message.md"
         );
     }
@@ -307,11 +317,16 @@ Second message
             session,
         });
         let tracker = Arc::new(
-            SessionTracker::new(&history_dir, provider.name())
+            SessionTracker::new(&history_dir, provider.name(), ExportFormat::Markdown)
                 .await
                 .unwrap(),
         );
-        let synchronizer = Synchronizer::new(provider, history_dir.clone(), tracker, false);
+        let synchronizer = Synchronizer::new(
+            provider,
+            history_dir.clone(),
+            tracker,
+            ExportOptions::default(),
+        );
 
         let status = synchronizer
             .sync_session(&session_path, false)
@@ -323,12 +338,17 @@ Second message
         assert!(content.contains("message_count: 2"));
         assert_eq!(content.matches("Second message").count(), 1);
 
-        let tracker = Arc::new(SessionTracker::new(&history_dir, "mock").await.unwrap());
+        let tracker = Arc::new(
+            SessionTracker::new(&history_dir, "mock", ExportFormat::Markdown)
+                .await
+                .unwrap(),
+        );
         let provider = Arc::new(MockProvider {
             session_path: session_path.clone(),
             session: two_message_session("session-1", target_project.clone(), now),
         });
-        let synchronizer = Synchronizer::new(provider, history_dir, tracker, false);
+        let synchronizer =
+            Synchronizer::new(provider, history_dir, tracker, ExportOptions::default());
 
         let status = synchronizer
             .sync_session(&session_path, false)
@@ -349,9 +369,8 @@ Second message
         session.messages.insert(
             1,
             ChatMessage {
-                id: "tool-1".to_string(),
                 timestamp: Some(now),
-                role: MessageRole::Tool,
+                role: MessageRole::Assistant(AssistantOutput::Tool),
                 content: r#"{"name":"read","input":{"path":"src/main.rs"}}"#.to_string(),
                 metadata: MessageMetadata::default(),
             },
@@ -362,14 +381,19 @@ Second message
             session: session.clone(),
         });
         let tracker = Arc::new(
-            SessionTracker::new(&history_dir, provider.name())
+            SessionTracker::new(&history_dir, provider.name(), ExportFormat::Markdown)
                 .await
                 .unwrap(),
         );
-        Synchronizer::new(provider, history_dir.clone(), tracker, false)
-            .sync_session(&session_path, false)
-            .await
-            .unwrap();
+        Synchronizer::new(
+            provider,
+            history_dir.clone(),
+            tracker,
+            ExportOptions::default(),
+        )
+        .sync_session(&session_path, false)
+        .await
+        .unwrap();
 
         let markdown_path = tokio::fs::read_dir(&history_dir)
             .await
@@ -382,26 +406,34 @@ Second message
         assert!(!tokio::fs::read_to_string(&markdown_path)
             .await
             .unwrap()
-            .contains("## 🛠️ Tool"));
+            .contains("🛠️ Tool"));
 
         let provider = Arc::new(MockProvider {
             session_path: session_path.clone(),
             session,
         });
         let tracker = Arc::new(
-            SessionTracker::new(&history_dir, provider.name())
+            SessionTracker::new(&history_dir, provider.name(), ExportFormat::Markdown)
                 .await
                 .unwrap(),
         );
-        let status = Synchronizer::new(provider, history_dir, tracker, true)
-            .sync_session(&session_path, false)
-            .await
-            .unwrap();
+        let status = Synchronizer::new(
+            provider,
+            history_dir,
+            tracker,
+            ExportOptions {
+                include_tool_calls: true,
+                ..Default::default()
+            },
+        )
+        .sync_session(&session_path, false)
+        .await
+        .unwrap();
 
         assert!(matches!(status, SyncStatus::Synced { new_messages: 3 }));
         let markdown = tokio::fs::read_to_string(markdown_path).await.unwrap();
         assert!(markdown.contains("include_tool_calls: true"));
-        assert!(markdown.contains("## 🛠️ Tool"));
+        assert!(markdown.contains("🛠️ Tool"));
     }
 
     #[test]
@@ -414,7 +446,6 @@ Second message
             started_at: Some(started_at),
             updated_at: Some(started_at),
             messages: vec![ChatMessage {
-                id: "msg-1".to_string(),
                 timestamp: Some(started_at),
                 role: MessageRole::User,
                 content: "Same title".to_string(),
@@ -423,7 +454,7 @@ Second message
         };
 
         assert_eq!(
-            session_markdown_filename(&session, "mock"),
+            session_export_filename(&session, "mock", ExportFormat::Markdown),
             "2026-04-07_03-39-25Z-mock-session-1-same-title.md"
         );
     }

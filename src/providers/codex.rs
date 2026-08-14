@@ -118,6 +118,9 @@ impl Provider for CodexProvider {
             .unwrap_or("unknown")
             .to_string();
         let mut session_project_path = PathBuf::new();
+        // A resumed or forked rollout replays the sessions it continues, so only the
+        // first `session_meta` identifies this file.
+        let mut identified = false;
 
         while let Some(line) = lines.next_line().await? {
             if line.trim().is_empty() {
@@ -126,7 +129,8 @@ impl Provider for CodexProvider {
 
             let event: CodexEvent = serde_json::from_str(&line)?;
             match event.event_type.as_str() {
-                "session_meta" => {
+                "session_meta" if !identified => {
+                    identified = true;
                     if let Some(payload) = event.payload {
                         if let Some(id) = payload
                             .get("id")
@@ -222,45 +226,56 @@ impl CodexProvider {
             .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
             .map(|value| value.with_timezone(&Utc));
         if is_tool_payload(&payload) {
-            let message_id = payload
-                .get("call_id")
-                .or_else(|| payload.get("id"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            return Ok(vec![ChatMessage::tool(message_id, timestamp, payload)]);
+            return Ok(vec![ChatMessage::tool(timestamp, payload)]);
+        }
+
+        if payload.get("type").and_then(Value::as_str) == Some("reasoning") {
+            // Codex stores the verbatim chain of thought encrypted; only the summary is readable.
+            let reasoning = payload
+                .get("summary")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            return Ok(if reasoning.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![ChatMessage::reasoning(timestamp, reasoning)]
+            });
         }
 
         let role = match payload.get("role").and_then(Value::as_str) {
             Some("user") => MessageRole::User,
-            Some("assistant") => MessageRole::Assistant,
+            Some("assistant") => MessageRole::Assistant(AssistantOutput::Message),
+            Some("developer") => MessageRole::System,
             _ => return Ok(Vec::new()),
         };
 
-        let message_id = payload
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        Ok(payload
+        // One request message can carry many content items; they belong to the same turn.
+        let content = payload
             .get("content")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .enumerate()
-            .filter_map(|(index, item)| {
+            .filter_map(|item| {
                 item.get("text")
                     .or_else(|| item.get("refusal"))
                     .and_then(Value::as_str)
-                    .map(|content| ChatMessage {
-                        id: format!("{message_id}:text:{index}"),
-                        timestamp,
-                        role,
-                        content: content.to_string(),
-                        metadata: MessageMetadata::default(),
-                    })
             })
-            .collect())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Ok(if content.is_empty() {
+            Vec::new()
+        } else {
+            vec![ChatMessage {
+                timestamp,
+                role,
+                content,
+                metadata: MessageMetadata::default(),
+            }]
+        })
     }
 }
 
@@ -455,7 +470,7 @@ mod tests {
         assert!(session
             .messages
             .iter()
-            .all(|message| message.role == MessageRole::Tool));
+            .all(|message| message.role == MessageRole::Assistant(AssistantOutput::Tool)));
         for (message, expected) in session.messages.iter().zip(expected) {
             assert_eq!(
                 serde_json::from_str::<Value>(&message.content).unwrap(),
@@ -465,7 +480,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preserves_injected_user_text_and_each_content_item() {
+    async fn keeps_injected_user_text_in_one_message_per_request() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("session.jsonl");
         let event = serde_json::json!({
@@ -490,7 +505,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages.len(), 1);
         assert_eq!(session.started_at, None);
         assert_eq!(session.updated_at, None);
         assert!(session
@@ -499,8 +514,103 @@ mod tests {
             .all(|message| message.timestamp.is_none()));
         assert_eq!(
             session.messages[0].content,
-            "<environment_context>keep me</environment_context>"
+            "<environment_context>keep me</environment_context>\n\nsecond block"
         );
-        assert_eq!(session.messages[1].content, "second block");
+    }
+
+    #[tokio::test]
+    async fn identity_comes_from_the_rollouts_own_session_meta() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("resumed.jsonl");
+        let project_path = temp_dir.path().join("project");
+        tokio::fs::create_dir(&project_path).await.unwrap();
+        // A resumed rollout replays the session it continues, including its metadata.
+        tokio::fs::write(
+            &file_path,
+            format!(
+                "{}\n{}",
+                session_meta_line("resumed-session", &project_path),
+                session_meta_line("replayed-earlier-session", &project_path),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let session = CodexProvider::new()
+            .parse_session(&file_path)
+            .await
+            .unwrap();
+
+        assert_eq!(session.session_id, "resumed-session");
+    }
+
+    #[tokio::test]
+    async fn records_readable_reasoning_and_skips_encrypted_only_reasoning() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("session.jsonl");
+        let payloads = [
+            serde_json::json!({
+                "type": "reasoning",
+                "id": "reasoning-1",
+                "summary": [
+                    {"type": "summary_text", "text": "**Planning the search**"},
+                    {"type": "summary_text", "text": "Checking the submodule"}
+                ],
+                "encrypted_content": "opaque"
+            }),
+            serde_json::json!({
+                "type": "reasoning",
+                "id": "reasoning-2",
+                "summary": [],
+                "encrypted_content": "opaque"
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "message-1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Found it"}]
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "message-2",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "<permissions instructions>"}]
+            }),
+        ];
+        let lines = payloads
+            .iter()
+            .map(|payload| {
+                serde_json::json!({
+                    "type": "response_item",
+                    "timestamp": "2026-08-13T00:00:00Z",
+                    "payload": payload
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        tokio::fs::write(&file_path, lines).await.unwrap();
+
+        let session = CodexProvider::new()
+            .parse_session(&file_path)
+            .await
+            .unwrap();
+
+        let recorded = session
+            .messages
+            .iter()
+            .map(|message| (message.role, message.content.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            recorded,
+            vec![
+                (
+                    MessageRole::Assistant(AssistantOutput::Reasoning),
+                    "**Planning the search**\n\nChecking the submodule"
+                ),
+                (MessageRole::Assistant(AssistantOutput::Message), "Found it"),
+                (MessageRole::System, "<permissions instructions>"),
+            ]
+        );
     }
 }

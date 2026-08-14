@@ -1,13 +1,16 @@
 use super::SessionState;
 use crate::error::Result;
+use crate::exporter::ExportFormat;
 use std::collections::HashMap;
 use tokio::fs;
 
-/// Scan markdown files to restore session state
-/// Returns a map of session_id -> SessionState
+/// Recover sync state for one provider from the exports already in a history directory.
+/// Only exports written in the requested format are considered, so switching formats
+/// leaves the other format's files untouched.
 pub(crate) async fn restore_from_disk(
     history_dir: &std::path::Path,
     provider_name: &str,
+    format: ExportFormat,
 ) -> Result<HashMap<String, SessionState>> {
     if !history_dir.exists() {
         return Ok(HashMap::new());
@@ -18,28 +21,26 @@ pub(crate) async fn restore_from_disk(
 
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+        if path.extension().and_then(|value| value.to_str()) != Some(format.extension()) {
             continue;
         }
-        let Ok(frontmatter) = crate::exporter::parse_frontmatter(&path).await else {
+        let Ok(header) = crate::exporter::read_header(&path, format).await else {
             continue;
         };
-        if frontmatter
-            .provider
-            .as_deref()
-            .is_some_and(|name| name != provider_name)
-        {
+        // Every export WayLog writes names its provider, so anything without a matching
+        // one belongs to someone else and must never be adopted as an export path.
+        if header.provider.as_deref() != Some(provider_name) {
             continue;
         }
-        let Some(session_id) = frontmatter.session_id else {
+        let Some(session_id) = header.session_id else {
             continue;
         };
         sessions_map.insert(
             session_id,
             SessionState {
-                markdown_path: path,
-                synced_message_count: frontmatter.message_count.unwrap_or(0),
-                include_tool_calls: frontmatter.include_tool_calls.unwrap_or(false),
+                export_path: path,
+                synced_message_count: header.message_count.unwrap_or(0),
+                include_tool_calls: header.include_tool_calls.unwrap_or(false),
             },
         );
     }

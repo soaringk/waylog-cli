@@ -61,6 +61,9 @@ waylog pull --recursive
 # 将工具调用及结果输出为 Tool 段落
 waylog pull --include-tool-calls
 
+# 面向程序输出结构化 JSON，而不是 Markdown
+waylog pull --format json
+
 # 为任意 pull 模式指定输出目录
 waylog pull --recursive --output-dir <目录>
 
@@ -74,6 +77,51 @@ waylog pull --provider codex --source <conversation/codex> --output-dir <目录>
 source 目录可以包含贡献者子目录。每个下载后的 provider 目录执行一次；传入的原始记录会重新生成对应 Markdown。多次写入同一个 `--output-dir` 时只更新本轮处理的 session，不删除其他文件。
 
 默认省略工具调用。`--include-tool-calls` 会把可识别的调用和结果合并到同一个 `Tool` 段落，删除稳定的协议包装以提高可读性；无法安全标准化时回退到完整原生 payload。模式变化时会重写已有 Markdown。
+
+### 输出格式
+
+历史记录主要给人读，因此默认输出 Markdown。程序应使用 `--format json`：每个 session 输出一份结构化文档，层级与 Markdown 完全一致——`turns` 数组中，user 与 system 轮次带 `content`，assistant 轮次带模型产出的 `parts`，每个 part 的 `kind` 为 `reasoning`、`message` 或 `tool`，按记录顺序排列。
+
+```json
+{
+  "provider": "codex",
+  "session_id": "019ffb27-9f2f-7822-a84a-c3f244e5d57f",
+  "project": "/path/to/project",
+  "started_at": "2026-08-13T12:47:14.819+00:00",
+  "updated_at": "2026-08-13T13:10:00.000+00:00",
+  "message_count": 78,
+  "include_tool_calls": false,
+  "turns": [
+    { "role": "user", "timestamp": "2026-08-13T12:47:14.819+00:00", "content": "..." },
+    {
+      "role": "assistant",
+      "timestamp": "2026-08-13T12:48:08.449+00:00",
+      "parts": [
+        { "kind": "reasoning", "timestamp": "2026-08-13T12:48:08.449+00:00", "content": "..." },
+        { "kind": "message", "timestamp": "2026-08-13T12:48:11.002+00:00", "content": "...", "model": "..." }
+      ]
+    }
+  ]
+}
+```
+
+要读助手说过的话，取所有 `kind` 为 `message` 的 `parts`。`message_count` 统计的是记录数，等于全部 parts 数加上 user、system 轮次数。
+
+不要靠匹配 Markdown 标题来还原结构：消息正文里可能出现与标题完全相同的行，因此从 Markdown 抽取本质上只能是近似的，这正是 `--format json` 存在的原因。缺失的值保持 `null`；`model`、`tokens`、`tool_call_id`、`tool_calls`、`thoughts` 只在 provider 确实记录时出现。
+
+两种格式内容一致，文件名相同、仅扩展名不同，因此同一目录可以同时存放两者。`waylog run` 始终输出 Markdown。
+
+### 会话结构
+
+每一轮用户输入是一个 `## 👤 User` 段落。助手在这一轮产出的全部内容归入同一个 `## 🤖 Assistant` 段落，其中各步骤按记录顺序嵌套：
+
+| 子段落 | 内容 |
+|--------|------|
+| `### 🧠 Reasoning` | 一步可读的推理过程，仅在 provider 保存了其文本时出现。 |
+| `### 💬 Message` | 助手写给你的一条回答。 |
+| `### 🛠️ Tool` | 一次调用及其结果，仅在 `--include-tool-calls` 下输出。 |
+
+多数 provider 会加密或直接丢弃逐字思维链。WayLog 只导出 provider 真正记录下来的推理文本，不重建其余部分，因此一轮助手输出中的推理步骤可能少于模型实际经历的步数。
 
 ![WayLog Pull Demo](demo/pull.gif)
 

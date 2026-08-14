@@ -1,18 +1,11 @@
 use crate::error::Result;
+use crate::exporter::ExportHeader;
 use std::path::Path;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 
-#[derive(Debug, Clone, Default)]
-pub struct Frontmatter {
-    pub session_id: Option<String>,
-    pub provider: Option<String>,
-    pub message_count: Option<usize>,
-    pub include_tool_calls: Option<bool>,
-}
-
-/// Parse minimal frontmatter from a markdown file
-pub async fn parse_frontmatter(path: &Path) -> Result<Frontmatter> {
+/// Read the sync state a readable export records in its frontmatter.
+pub async fn parse_frontmatter(path: &Path) -> Result<ExportHeader> {
     let mut file = fs::File::open(path).await?;
 
     // Read first 2KB which should cover the frontmatter
@@ -20,7 +13,7 @@ pub async fn parse_frontmatter(path: &Path) -> Result<Frontmatter> {
     let n = file.read(&mut buffer).await?;
     let content = String::from_utf8_lossy(&buffer[..n]);
 
-    let mut fm = Frontmatter::default();
+    let mut fm = ExportHeader::default();
 
     if let Some(stripped) = content.strip_prefix("---") {
         if let Some(end_idx) = stripped.find("---") {

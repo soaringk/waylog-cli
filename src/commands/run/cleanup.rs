@@ -33,7 +33,7 @@ pub(crate) async fn cleanup_and_sync(
         provider.clone(),
         waylog_dir.to_path_buf(),
         tracker.clone(),
-        false,
+        crate::exporter::ExportOptions::default(),
     );
 
     match synchronizer.sync_session(&session_file, false).await {

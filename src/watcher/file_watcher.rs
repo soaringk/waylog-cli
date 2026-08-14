@@ -29,7 +29,7 @@ impl FileWatcher {
             provider.clone(),
             crate::utils::path::get_waylog_dir(&tracking_root),
             tracker,
-            false,
+            crate::exporter::ExportOptions::default(),
         );
 
         Self {

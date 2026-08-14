@@ -2,7 +2,7 @@
 
 ## Purpose
 
-WayLog is a local-first Rust CLI that turns coding-agent histories into readable Markdown without changing provider-owned data.
+WayLog is a local-first Rust CLI that turns coding-agent histories into readable Markdown, or structured JSON for programs, without changing provider-owned data.
 
 ## Modes
 
@@ -12,17 +12,22 @@ WayLog is a local-first Rust CLI that turns coding-agent histories into readable
 - `waylog pull --provider <provider> --session <id>` targets one session in local provider history and may write to a caller-managed directory.
 - `--source` parses supplied provider artifacts or a downloaded provider directory tree without local session discovery, allowing collectors and a centralized parser to remain separate while preserving upload grouping.
 - `--include-tool-calls` adds calls and results as `Tool` messages, removes stable protocol wrappers for readability, and falls back to the complete native payload when normalization is unsafe.
+- `--format json` writes each session as one structured document instead of Markdown, so consumers read records rather than matching headings. `run` always writes the default Markdown.
 
 ## Core Boundaries
 
 - `providers::base::Provider` owns native storage discovery, project matching, session lookup, and conversion into `ChatSession`.
+- `providers::base` models a conversation as ordered records. Everything the model produced carries `MessageRole::Assistant(AssistantOutput)`, so reasoning, answers, and tool exchanges cannot be mistaken for separate speakers.
+- `exporter::entries` derives the turn structure once, so both formats present the same hierarchy.
 - Direct source parsing bypasses discovery, treats supplied artifacts as authoritative, and still crosses the same `Provider::parse_session` seam.
 - Provider history availability is independent of the optional CLI launch command, so application-only providers participate in `pull` without pretending to support `run`.
 - Claude-family providers share JSONL parsing and main-session enumeration while keeping product-specific storage discovery behind `Provider`.
 - Qoder is project-scoped, while QoderWork is application-wide and scans its task workspaces once per pull.
 - `Synchronizer` owns provider-independent sync behavior and status reporting.
-- `SessionTracker` reconstructs provider-specific sync state from Markdown frontmatter, avoiding a second state store.
-- `exporter::markdown` owns the Markdown and frontmatter representation.
+- `SessionTracker` reconstructs provider-specific sync state from the exports already on disk, avoiding a second state store, and only considers the format being written.
+- `exporter` owns the format-neutral seam: which messages an export contains, how one is written, and how its recorded sync state is read back.
+- `exporter::markdown` owns the readable representation, including grouping consecutive assistant steps into one turn and nesting reasoning, answers, and tool exchanges beneath it.
+- `exporter::json` owns the structured representation: session metadata plus `turns`, where an assistant turn carries its `parts`.
 - `output` owns human and JSON terminal output.
 
 ## Distribution
@@ -32,3 +37,4 @@ WayLog is a local-first Rust CLI that turns coding-agent histories into readable
 ## Evolution Notes
 
 - Add new agent formats behind `Provider`; do not branch shared synchronization logic for provider-specific behavior.
+- Add new export representations behind `exporter::ExportFormat`; presentation belongs there, never in a provider.

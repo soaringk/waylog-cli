@@ -11,9 +11,10 @@ mod utils;
 mod watcher;
 
 use clap::Parser;
-use cli::{Cli, Commands, OutputFormat};
+use cli::{Cli, Commands, ExportFormatArg, OutputFormat};
 use commands::{handle_pull, handle_run, PullOptions};
 use error::WaylogError;
+use exporter::{ExportFormat, ExportOptions};
 use output::Output;
 use std::io::Write;
 
@@ -79,6 +80,7 @@ async fn main() {
                 source,
                 output_dir,
                 include_tool_calls,
+                format,
             } => {
                 handle_pull(
                     PullOptions {
@@ -89,7 +91,10 @@ async fn main() {
                         session_id: session,
                         source,
                         output_dir,
-                        include_tool_calls,
+                        export: ExportOptions {
+                            format: export_format(format),
+                            include_tool_calls,
+                        },
                         verbose: cli.verbose,
                     },
                     project_root,
@@ -116,5 +121,13 @@ async fn main() {
             }
             std::process::exit(e.exit_code());
         }
+    }
+}
+
+/// `cli` stays free of crate imports because `build.rs` compiles it on its own.
+fn export_format(argument: ExportFormatArg) -> ExportFormat {
+    match argument {
+        ExportFormatArg::Markdown => ExportFormat::Markdown,
+        ExportFormatArg::Json => ExportFormat::Json,
     }
 }

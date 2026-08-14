@@ -107,32 +107,25 @@ impl OpenCodeProvider {
         for part_data in rows {
             parts.push(serde_json::from_str(&part_data.map_err(sqlite_error)?)?);
         }
-        self.message_from_parts(message_id, fallback_time, info, parts)
+        self.message_from_parts(fallback_time, info, parts)
     }
 
     fn message_from_parts(
         &self,
-        message_id: String,
         fallback_time: Option<i64>,
         info: Value,
         parts: Vec<Value>,
     ) -> Result<Vec<ChatMessage>> {
         let role = match info.get("role").and_then(Value::as_str) {
             Some("user") => MessageRole::User,
-            Some("assistant") => MessageRole::Assistant,
+            Some("assistant") => MessageRole::Assistant(AssistantOutput::Message),
             _ => return Ok(Vec::new()),
         };
 
-        let mut thoughts = Vec::new();
         let mut tool_calls = Vec::new();
 
         for part in &parts {
             match part.get("type").and_then(Value::as_str) {
-                Some("reasoning") => {
-                    if let Some(value) = non_empty_string(part.get("text")) {
-                        thoughts.push(value.to_string());
-                    }
-                }
                 _ if is_tool_payload(part) => {
                     if let Some(value) =
                         non_empty_string(part.get("tool").or_else(|| part.get("name")))
@@ -175,15 +168,19 @@ impl OpenCodeProvider {
 
         let mut messages = Vec::new();
         let mut text_index = 0;
-        let mut tool_index = 0;
         for part in parts {
             match part.get("type").and_then(Value::as_str) {
+                Some("reasoning") => {
+                    let Some(content) = non_empty_string(part.get("text")) else {
+                        continue;
+                    };
+                    messages.push(ChatMessage::reasoning(timestamp, content.to_string()));
+                }
                 Some("text") if part.get("ignored").and_then(Value::as_bool) != Some(true) => {
                     let Some(content) = non_empty_string(part.get("text")) else {
                         continue;
                     };
                     messages.push(ChatMessage {
-                        id: format!("{message_id}:text:{text_index}"),
                         timestamp,
                         role,
                         content: content.to_string(),
@@ -199,23 +196,13 @@ impl OpenCodeProvider {
                             } else {
                                 Vec::new()
                             },
-                            thoughts: if text_index == 0 {
-                                thoughts.clone()
-                            } else {
-                                Vec::new()
-                            },
                             ..Default::default()
                         },
                     });
                     text_index += 1;
                 }
                 _ if is_tool_payload(&part) => {
-                    messages.push(ChatMessage::tool(
-                        format!("{message_id}:tool:{tool_index}"),
-                        timestamp,
-                        part,
-                    ));
-                    tool_index += 1;
+                    messages.push(ChatMessage::tool(timestamp, part));
                 }
                 _ => {}
             }
@@ -251,13 +238,6 @@ impl OpenCodeProvider {
             let Some(message_info) = message.get("info").cloned() else {
                 continue;
             };
-            let Some(message_id) = message_info
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-            else {
-                continue;
-            };
             let fallback_time = message_info
                 .pointer("/time/created")
                 .and_then(Value::as_i64);
@@ -266,12 +246,7 @@ impl OpenCodeProvider {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            messages.extend(self.message_from_parts(
-                message_id,
-                fallback_time,
-                message_info,
-                parts,
-            )?);
+            messages.extend(self.message_from_parts(fallback_time, message_info, parts)?);
         }
 
         Ok(ChatSession {
@@ -542,26 +517,58 @@ mod tests {
 
         assert_eq!(session.session_id, "ses_test");
         assert_eq!(session.project_path, project_path);
-        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.messages.len(), 4);
         assert_eq!(session.messages[0].content, "Implement the feature");
-        assert_eq!(session.messages[1].role, MessageRole::Tool);
         assert_eq!(
-            session.messages[1].metadata.tool_call_id.as_deref(),
+            session.messages[1].role,
+            MessageRole::Assistant(AssistantOutput::Reasoning)
+        );
+        assert_eq!(session.messages[1].content, "Inspect the existing design");
+        assert_eq!(
+            session.messages[2].role,
+            MessageRole::Assistant(AssistantOutput::Tool)
+        );
+        assert_eq!(
+            session.messages[2].metadata.tool_call_id.as_deref(),
             Some("call_1")
         );
-        assert!(session.messages[1].content.contains("src/main.rs"));
-        assert!(session.messages[1].content.contains("file contents"));
-        assert_eq!(session.messages[2].content, "Done");
+        assert!(session.messages[2].content.contains("src/main.rs"));
+        assert!(session.messages[2].content.contains("file contents"));
+        assert_eq!(session.messages[3].content, "Done");
         assert_eq!(
-            session.messages[2].metadata.thoughts,
-            vec!["Inspect the existing design"]
-        );
-        assert_eq!(
-            session.messages[2].metadata.model.as_deref(),
+            session.messages[3].metadata.model.as_deref(),
             Some("anthropic/claude-test")
         );
-        let tokens = session.messages[2].metadata.tokens.as_ref().unwrap();
+        let tokens = session.messages[3].metadata.tokens.as_ref().unwrap();
         assert_eq!((tokens.input, tokens.output, tokens.cached), (12, 8, 3));
+    }
+
+    #[test]
+    fn reasoning_is_recorded_without_a_text_part() {
+        let messages = OpenCodeProvider::new()
+            .message_from_parts(
+                None,
+                json!({"role": "assistant"}),
+                vec![
+                    json!({"type": "reasoning", "text": "Reading the failing test"}),
+                    json!({"type": "tool", "tool": "read", "callID": "call_1", "state": {"output": "contents"}}),
+                    json!({"type": "reasoning", "text": ""}),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.role)
+                .collect::<Vec<_>>(),
+            vec![
+                MessageRole::Assistant(AssistantOutput::Reasoning),
+                MessageRole::Assistant(AssistantOutput::Tool)
+            ]
+        );
+        assert_eq!(messages[0].content, "Reading the failing test");
+        assert!(messages[1].content.contains("contents"));
     }
 
     #[tokio::test]
@@ -623,19 +630,23 @@ mod tests {
 
         assert_eq!(session.session_id, "ses_export");
         assert_eq!(session.project_path, project_path);
-        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.messages.len(), 4);
         assert_eq!(session.messages[0].content, "Implement the feature");
-        assert_eq!(session.messages[1].role, MessageRole::Tool);
         assert_eq!(
-            session.messages[1].metadata.tool_call_id.as_deref(),
+            session.messages[1].role,
+            MessageRole::Assistant(AssistantOutput::Reasoning)
+        );
+        assert_eq!(session.messages[1].content, "Inspect the existing design");
+        assert_eq!(
+            session.messages[2].role,
+            MessageRole::Assistant(AssistantOutput::Tool)
+        );
+        assert_eq!(
+            session.messages[2].metadata.tool_call_id.as_deref(),
             Some("call_1")
         );
-        assert!(session.messages[1].content.contains("src/main.rs"));
-        assert!(session.messages[1].content.contains("file contents"));
-        assert_eq!(session.messages[2].content, "Done");
-        assert_eq!(
-            session.messages[2].metadata.thoughts,
-            vec!["Inspect the existing design"]
-        );
+        assert!(session.messages[2].content.contains("src/main.rs"));
+        assert!(session.messages[2].content.contains("file contents"));
+        assert_eq!(session.messages[3].content, "Done");
     }
 }

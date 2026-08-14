@@ -16,14 +16,24 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub quiet: bool,
 
-    /// Output format
+    /// Format of this command's terminal output
     #[arg(long, default_value = "text", global = true)]
     pub output: OutputFormat,
 }
 
+/// Format of this command's terminal output.
 #[derive(Debug, Clone, ValueEnum)]
 pub enum OutputFormat {
     Text,
+    Json,
+}
+
+/// Representation each exported session file is written in.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ExportFormatArg {
+    /// Markdown for people to read.
+    Markdown,
+    /// Structured records for programs to consume.
     Json,
 }
 
@@ -76,13 +86,17 @@ pub enum Commands {
         )]
         source: Option<std::path::PathBuf>,
 
-        /// Write Markdown directly to this directory (default: .waylog/history)
+        /// Write exported sessions directly to this directory (default: .waylog/history)
         #[arg(long, value_name = "DIR")]
         output_dir: Option<std::path::PathBuf>,
 
-        /// Include tool calls and results in Markdown
+        /// Include tool calls and results in the exported sessions
         #[arg(long)]
         include_tool_calls: bool,
+
+        /// Representation of each exported session file
+        #[arg(long, value_name = "FORMAT", default_value = "markdown")]
+        format: ExportFormatArg,
     },
 }
 

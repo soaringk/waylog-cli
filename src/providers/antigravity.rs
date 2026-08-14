@@ -251,7 +251,6 @@ struct AntigravityEvent {
     content: Option<String>,
     thinking: Option<String>,
     tool_calls: Option<Vec<Value>>,
-    step_index: Option<u64>,
 }
 
 impl AntigravityEvent {
@@ -266,7 +265,7 @@ impl AntigravityEvent {
 
         let role = match (self.event_type.as_str(), self.source.as_str()) {
             ("USER_INPUT", "USER_EXPLICIT") => MessageRole::User,
-            ("PLANNER_RESPONSE", "MODEL") => MessageRole::Assistant,
+            ("PLANNER_RESPONSE", "MODEL") => MessageRole::Assistant(AssistantOutput::Message),
             _ => return Vec::new(),
         };
 
@@ -277,10 +276,6 @@ impl AntigravityEvent {
             .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
             .map(|value| value.with_timezone(&Utc));
 
-        let message_id = self
-            .step_index
-            .map(|idx| idx.to_string())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let tool_calls = self.tool_calls.unwrap_or_default();
         let tool_names = tool_calls
             .iter()
@@ -290,7 +285,6 @@ impl AntigravityEvent {
         let mut messages = Vec::new();
         if !content.trim().is_empty() {
             messages.push(ChatMessage {
-                id: message_id.clone(),
                 timestamp,
                 role,
                 content,
@@ -301,9 +295,11 @@ impl AntigravityEvent {
                 },
             });
         }
-        messages.extend(tool_calls.into_iter().enumerate().map(|(index, call)| {
-            ChatMessage::tool(format!("{message_id}:tool:{index}"), timestamp, call)
-        }));
+        messages.extend(
+            tool_calls
+                .into_iter()
+                .map(|call| ChatMessage::tool(timestamp, call)),
+        );
         messages
     }
 }
@@ -342,9 +338,12 @@ mod tests {
         .unwrap()
         .into_chat_messages();
         let model_message = &model[0];
-        assert_eq!(model_message.role, MessageRole::Assistant);
+        assert_eq!(
+            model_message.role,
+            MessageRole::Assistant(AssistantOutput::Message)
+        );
         assert_eq!(model_message.metadata.thoughts, vec!["plan".to_string()]);
-        assert_eq!(model[1].role, MessageRole::Tool);
+        assert_eq!(model[1].role, MessageRole::Assistant(AssistantOutput::Tool));
         assert_eq!(
             serde_json::from_str::<Value>(&model[1].content).unwrap(),
             serde_json::json!({

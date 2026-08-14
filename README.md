@@ -61,6 +61,9 @@ waylog pull --recursive
 # Include tool calls and results as Tool sections
 waylog pull --include-tool-calls
 
+# Write structured JSON for programs instead of Markdown
+waylog pull --format json
+
 # Choose the output directory for any pull mode
 waylog pull --recursive --output-dir <directory>
 
@@ -74,6 +77,51 @@ waylog pull --provider codex --source <conversation/codex> --output-dir <directo
 A source directory may contain contributor subdirectories. Run the command once per downloaded provider directory; supplied artifacts regenerate their Markdown. Repeated pulls to one `--output-dir` update processed sessions without deleting other files.
 
 Tool calls are omitted by default. `--include-tool-calls` groups each recognized request and response into one `Tool` section, removes stable protocol wrappers for readability, and falls back to the complete native payload when normalization is unsafe. Existing Markdown is rewritten when this mode changes.
+
+### Output formats
+
+Markdown is the default because histories are mostly read by people. Programs should use `--format json`, which writes one structured document per session with the same hierarchy the Markdown shows: a `turns` array where a user or system turn carries `content`, and an assistant turn carries the `parts` the model produced — each part a `reasoning`, `message`, or `tool` kind, in recorded order.
+
+```json
+{
+  "provider": "codex",
+  "session_id": "019ffb27-9f2f-7822-a84a-c3f244e5d57f",
+  "project": "/path/to/project",
+  "started_at": "2026-08-13T12:47:14.819+00:00",
+  "updated_at": "2026-08-13T13:10:00.000+00:00",
+  "message_count": 78,
+  "include_tool_calls": false,
+  "turns": [
+    { "role": "user", "timestamp": "2026-08-13T12:47:14.819+00:00", "content": "..." },
+    {
+      "role": "assistant",
+      "timestamp": "2026-08-13T12:48:08.449+00:00",
+      "parts": [
+        { "kind": "reasoning", "timestamp": "2026-08-13T12:48:08.449+00:00", "content": "..." },
+        { "kind": "message", "timestamp": "2026-08-13T12:48:11.002+00:00", "content": "...", "model": "..." }
+      ]
+    }
+  ]
+}
+```
+
+To read what the assistant said, take every `parts` entry whose `kind` is `message`. `message_count` counts records, so it equals the number of parts plus the number of user and system turns.
+
+Do not recover structure by matching Markdown headings: message text can contain lines that look exactly like them, so extraction from Markdown is approximate by nature. `--format json` exists for that reason. Absent values stay `null`, and `model`, `tokens`, `tool_call_id`, `tool_calls`, and `thoughts` appear only when the provider recorded them.
+
+Both formats hold the same content and use the same filename with a different extension, so one directory can hold both. `waylog run` always writes Markdown.
+
+### Conversation layout
+
+Each user turn is a `## 👤 User` section. Everything the assistant produced in reply belongs to one `## 🤖 Assistant` section, whose steps are nested in recorded order:
+
+| Subsection | Content |
+|------------|---------|
+| `### 🧠 Reasoning` | One readable reasoning step, when the provider stored its text. |
+| `### 💬 Message` | One answer the assistant addressed to you. |
+| `### 🛠️ Tool` | One request and its result, only with `--include-tool-calls`. |
+
+Providers encrypt or omit most verbatim chains of thought. WayLog exports only the reasoning text a provider actually recorded and never reconstructs the rest, so an assistant turn can hold fewer reasoning steps than the model took.
 
 ![WayLog Pull Demo](demo/pull.gif)
 

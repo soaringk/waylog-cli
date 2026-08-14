@@ -1,4 +1,5 @@
 use crate::error::{Result, WaylogError};
+use crate::exporter::ExportOptions;
 use crate::output::Output;
 use crate::providers::base::Provider;
 use crate::synchronizer::SyncStatus;
@@ -18,7 +19,7 @@ pub struct PullOptions {
     pub session_id: Option<String>,
     pub source: Option<PathBuf>,
     pub output_dir: Option<PathBuf>,
-    pub include_tool_calls: bool,
+    pub export: ExportOptions,
     pub verbose: bool,
 }
 
@@ -35,7 +36,7 @@ pub async fn handle_pull(
         session_id,
         source,
         output_dir,
-        include_tool_calls,
+        export,
         verbose,
     } = options;
     output.pull_start(&project_path, recursive, include_hidden)?;
@@ -69,13 +70,11 @@ pub async fn handle_pull(
             continue;
         }
 
-        let tracker = Arc::new(session::SessionTracker::new(&history_dir, provider.name()).await?);
-        let synchronizer = synchronizer::Synchronizer::new(
-            provider.clone(),
-            history_dir.clone(),
-            tracker,
-            include_tool_calls,
+        let tracker = Arc::new(
+            session::SessionTracker::new(&history_dir, provider.name(), export.format).await?,
         );
+        let synchronizer =
+            synchronizer::Synchronizer::new(provider.clone(), history_dir.clone(), tracker, export);
 
         let session_paths = if let Some(source) = &source {
             collect_source_paths(source)?
@@ -248,7 +247,7 @@ async fn collect_session_paths(
 mod tests {
     use super::*;
     use crate::providers::base::{
-        ChatMessage, ChatSession, MessageMetadata, MessageRole, Provider,
+        AssistantOutput, ChatMessage, ChatSession, MessageMetadata, MessageRole, Provider,
     };
     use async_trait::async_trait;
     use chrono::Utc;
@@ -286,7 +285,6 @@ mod tests {
                 started_at: Some(Utc::now()),
                 updated_at: Some(Utc::now()),
                 messages: vec![ChatMessage {
-                    id: "msg-1".to_string(),
                     timestamp: Some(Utc::now()),
                     role: MessageRole::User,
                     content: "hello".to_string(),
