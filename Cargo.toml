@@ -1,6 +1,6 @@
 [package]
 name = "waylog"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2021"
 authors = ["WayLog Contributors"]
 description = "Save AI conversations as local Markdown files."
