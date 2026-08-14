@@ -11,25 +11,27 @@
 
 ## Parsing
 
-- Provider parsing must not fabricate source content. Missing or invalid values stay absent or `null`, timestamps never fall back to wall-clock time, and encrypted or omitted reasoning stays missing instead of being reconstructed or replaced by a placeholder.
-- Parsing must preserve every readable step of an assistant turn, not only its final answer. Reasoning, answers, and tool records are separate records distinguished by `AssistantOutput`, so none can hide another.
-- Provider text is reproduced exactly. Formatting may add spacing around a record but must never trim or rewrite its content, because trailing whitespace can carry meaning.
-- One provider request maps to one message; its content items are joined rather than split, because splitting a single input into many messages buries the assistant's replies.
-- Tool detection uses structural protocol markers instead of closed type allowlists. Normalization may remove only confirmed stable wrappers and falls back to the complete native value when unsafe.
-- Session parsing failures make a batch pull fail only when every attempted session fails; a one-session pull reflects that session's result.
+- Never fabricate content. Absent values stay `null`, timestamps never fall back to wall-clock time, and unreadable reasoning stays missing.
+- Reproduce provider text exactly. Add spacing around a record, never inside it; trailing whitespace can carry meaning.
+- Keep records in recorded order for every provider. Order is causal order: input arriving mid-turn must stay where it landed, or nothing explains why the assistant changed course.
+- One request is one message: join its text blocks. Only a block WayLog also exports, such as reasoning or a tool record, splits them.
+- Never infer a turn boundary. Providers record later input as an ordinary message, so only a run of model output is an observable turn.
+- Preserve every readable step of a turn, not just the answer. `AssistantOutput` distinguishes reasoning, answers, and tool records so none hides another.
+- Detect tool records by structural markers, not a type allowlist. Strip only confirmed wrappers; fall back to the native value.
+- A batch pull fails only if every session fails. A one-session pull reports that session.
 
 ## Export
 
-- Markdown is written for people and JSON for programs. Both render the same entries from `exporter::entries`, so a format may change presentation but never structure or content.
-- Everything the model produced belongs to one assistant turn. No format may present reasoning, answers, or tool exchanges as peers of the user's input.
-- Message text can contain lines that look like Markdown headings, so structure must never be recovered by matching heading text. Machine consumers use `--format json`.
-- Tool records are opt-in. Changing `--include-tool-calls` must rewrite the affected export instead of reusing incompatible sync state.
-- Output directories are merge targets: a pull creates or replaces only the path it derives for a session it processes, and never touches any other file, including exports written in the other format. A file already occupying a derived path is replaced whatever its contents, which is how a truncated or hand-edited export repairs itself.
-- Each export records its own sync state, Markdown in frontmatter and JSON in its top-level fields, so no separate state store exists. Filenames include the provider session ID to preserve identity outside the local history tree.
-- Every export names its provider, so sync-state restoration requires an exact match on provider, session ID, and export format. A file that does not match belongs to someone else and must never be adopted as an export path, because adopting it would overwrite it.
-- A recorded message count that differs from the current parse in either direction means the export is stale and must be rewritten.
-- Exports carry no layout version, so a release that changes export structure reaches existing files only when their message count also changed. Such releases must tell users to run one `--force` pull; do not add a version discriminator whose correctness depends on remembering to bump it.
-- Sync-state decisions belong to `Synchronizer`, so `run`, `pull`, `--recursive`, and `--source` behave identically. Modes differ only in which sessions they select and whether they force.
+- Markdown is for people, JSON for programs. Both render `exporter::entries`, so a format changes presentation only.
+- Everything the model produced belongs to one assistant turn. No format may show reasoning, answers, or tool records as peers of user input.
+- Message text can imitate Markdown headings, so never recover structure by matching them. Machine consumers use `--format json`.
+- Tool records are opt-in. Changing `--include-tool-calls` rewrites the affected export.
+- A pull writes only the path it derives for a session it processes, and replaces whatever occupies that path. It touches nothing else, including the other format's exports.
+- Each export carries its own sync state: Markdown in frontmatter, JSON in top-level fields. There is no second store.
+- Restoring that state requires an exact match on provider, session ID, and format. A file that does not match is another tool's, and adopting it would overwrite it.
+- A message count that differs from the current parse in either direction means the export is stale.
+- Exports carry no layout version, so a structural change reaches old files only when their count also changed. Such releases tell users to run `--force` once. Do not add a discriminator that depends on remembering to bump it.
+- Sync-state decisions live in `Synchronizer`, so all modes behave alike. Modes differ only in which sessions they select and whether they force.
 
 ## Compatibility
 

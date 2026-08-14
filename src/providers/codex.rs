@@ -253,29 +253,31 @@ impl CodexProvider {
             _ => return Ok(Vec::new()),
         };
 
-        // One request message can carry many content items; they belong to the same turn.
-        let content = payload
+        // Content holds text and media WayLog drops, so one request is one message.
+        let items = payload
             .get("content")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
+            .filter(|item| item.get("text").or_else(|| item.get("refusal")).is_some())
+            .cloned()
+            .collect();
+        Ok(join_consecutive_text(items, &["input_text", "output_text"])
+            .into_iter()
             .filter_map(|item| {
                 item.get("text")
                     .or_else(|| item.get("refusal"))
                     .and_then(Value::as_str)
+                    .filter(|content| !content.is_empty())
+                    .map(str::to_string)
             })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        Ok(if content.is_empty() {
-            Vec::new()
-        } else {
-            vec![ChatMessage {
+            .map(|content| ChatMessage {
                 timestamp,
                 role,
                 content,
                 metadata: MessageMetadata::default(),
-            }]
-        })
+            })
+            .collect())
     }
 }
 
@@ -515,6 +517,43 @@ mod tests {
         assert_eq!(
             session.messages[0].content,
             "<environment_context>keep me</environment_context>\n\nsecond block"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_media_does_not_split_one_request() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("session.jsonl");
+        let event = serde_json::json!({
+            "type": "response_item",
+            "timestamp": "2026-08-14T00:00:00Z",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "before the screenshot"},
+                    {"type": "input_image", "image_url": "data:..."},
+                    {"type": "input_text", "text": "after the screenshot"}
+                ]
+            }
+        });
+        tokio::fs::write(&file_path, event.to_string())
+            .await
+            .unwrap();
+
+        let session = CodexProvider::new()
+            .parse_session(&file_path)
+            .await
+            .unwrap();
+
+        // The image is not exported, so it cannot split what the user sent at once.
+        assert_eq!(
+            session
+                .messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["before the screenshot\n\nafter the screenshot"]
         );
     }
 

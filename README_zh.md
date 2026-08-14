@@ -105,7 +105,7 @@ source 目录可以包含贡献者子目录。每个下载后的 provider 目录
 }
 ```
 
-要读助手说过的话，取所有 `kind` 为 `message` 的 `parts`。`message_count` 统计的是记录数，等于全部 parts 数加上 user、system 轮次数。
+记录保持 provider 写入的顺序，也就是因果顺序：助手工作期间发来的输入会出现在两个 assistant 轮次之间，而不会被并入前一条。要读助手说过的话，取所有 `kind` 为 `message` 的 `parts`。`message_count` 统计的是记录数，等于全部 parts 数加上 user、system 轮次数。
 
 不要靠匹配 Markdown 标题来还原结构：消息正文里可能出现与标题完全相同的行，因此从 Markdown 抽取本质上只能是近似的，这正是 `--format json` 存在的原因。缺失的值保持 `null`；`model`、`tokens`、`tool_call_id`、`tool_calls`、`thoughts` 只在 provider 确实记录时出现。
 

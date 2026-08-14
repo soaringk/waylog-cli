@@ -105,7 +105,7 @@ Markdown is the default because histories are mostly read by people. Programs sh
 }
 ```
 
-To read what the assistant said, take every `parts` entry whose `kind` is `message`. `message_count` counts records, so it equals the number of parts plus the number of user and system turns.
+Records stay in the order the provider wrote them, which is causal order: input sent while the assistant is working appears between assistant turns rather than folded into an earlier one. To read what the assistant said, take every `parts` entry whose `kind` is `message`. `message_count` counts records, so it equals the number of parts plus the number of user and system turns.
 
 Do not recover structure by matching Markdown headings: message text can contain lines that look exactly like them, so extraction from Markdown is approximate by nature. `--format json` exists for that reason. Absent values stay `null`, and `model`, `tokens`, `tool_call_id`, `tool_calls`, and `thoughts` appear only when the provider recorded them.
 

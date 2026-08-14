@@ -2,6 +2,13 @@
 
 User-facing features and critical fixes are documented here from version 0.3.0 onward.
 
+## [Unreleased]
+
+### Fixed
+
+- Every provider now treats one request as one message. Claude, Qoder, QoderWork and OpenCode were splitting a request into several turns; over half of local QoderWork requests were split, each `<system-reminder>` becoming its own user turn.
+- Text is only split by a block WayLog also exports, such as reasoning or a tool record. Media that WayLog drops no longer breaks a request in two.
+
 ## [0.4.0] - 2026-08-14
 
 ### Added

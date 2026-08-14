@@ -102,6 +102,31 @@ pub fn message_time_range(
     (started_at, updated_at)
 }
 
+/// Join text blocks a provider recorded next to each other in one request. Callers pass
+/// only the blocks they export, so text never merges across a record that WayLog keeps,
+/// and a block WayLog drops cannot split one submission in two.
+pub fn join_consecutive_text(items: Vec<Value>, text_types: &[&str]) -> Vec<Value> {
+    let text = |item: &Value| {
+        item.get("type")
+            .and_then(Value::as_str)
+            .filter(|kind| text_types.contains(kind))
+            .and_then(|_| item.get("text").and_then(Value::as_str))
+            .map(str::to_string)
+    };
+
+    let mut joined: Vec<Value> = Vec::new();
+    for item in items {
+        match (text(&item), joined.last_mut().and_then(|last| text(last))) {
+            (Some(next), Some(previous)) => {
+                let last = joined.last_mut().expect("checked above");
+                last["text"] = Value::String(format!("{previous}\n\n{next}"));
+            }
+            _ => joined.push(item),
+        }
+    }
+    joined
+}
+
 pub fn is_tool_payload(payload: &Value) -> bool {
     let Some(object) = payload.as_object() else {
         return false;
@@ -265,6 +290,24 @@ pub trait Provider: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joins_neighbouring_text_but_keeps_a_later_message_in_place() {
+        let items = vec![
+            serde_json::json!({"type": "text", "text": "<system-reminder>"}),
+            serde_json::json!({"type": "text", "text": "the real request"}),
+            serde_json::json!({"type": "tool_use", "id": "call-1", "name": "read"}),
+            serde_json::json!({"type": "text", "text": "steer: stop waiting"}),
+        ];
+
+        let joined = join_consecutive_text(items, &["text"]);
+
+        assert_eq!(joined.len(), 3);
+        assert_eq!(joined[0]["text"], "<system-reminder>\n\nthe real request");
+        assert_eq!(joined[1]["type"], "tool_use");
+        // A text block after other content keeps its own position.
+        assert_eq!(joined[2]["text"], "steer: stop waiting");
+    }
 
     #[test]
     fn tool_detection_matches_protocol_tokens_not_substrings() {

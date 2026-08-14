@@ -87,14 +87,16 @@ fn exported_messages(
 
 /// One step of a conversation. Both formats render this same shape.
 pub(crate) enum Entry<'a> {
-    /// A record the user or the provider contributed.
+    /// One record the user or the provider contributed, kept where it was recorded.
     Standalone(&'a ChatMessage),
-    /// Everything the model produced before the conversation returned to the user.
+    /// A run of model output. This is the only turn boundary a provider makes
+    /// observable: everything until the conversation returns to the user.
     AssistantTurn(Vec<&'a ChatMessage>),
 }
 
-/// Split a session into conversation entries, gathering each run of model output into
-/// one assistant turn.
+/// Split a session into entries in recorded order. Model output groups into a turn;
+/// every other record stands where it is, so a later user input stays at the point it
+/// changed the assistant's course.
 pub(crate) fn entries(session: &ChatSession, include_tool_calls: bool) -> Vec<Entry<'_>> {
     let mut entries = Vec::new();
     for message in exported_messages(session, include_tool_calls) {

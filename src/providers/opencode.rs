@@ -166,6 +166,19 @@ impl OpenCodeProvider {
             })
         });
 
+        // Only parts that become records may split a run.
+        let parts = join_consecutive_text(
+            parts
+                .into_iter()
+                .filter(|part| match part.get("type").and_then(Value::as_str) {
+                    Some("text") => part.get("ignored").and_then(Value::as_bool) != Some(true),
+                    Some("reasoning") => true,
+                    _ => is_tool_payload(part),
+                })
+                .collect(),
+            &["text"],
+        );
+
         let mut messages = Vec::new();
         let mut text_index = 0;
         for part in parts {

@@ -150,10 +150,22 @@ fn parse_messages(event: ClaudeEvent) -> Result<Vec<ChatMessage>> {
         output: usage.output_tokens,
         cached: usage.cache_read_input_tokens.unwrap_or(0),
     });
-    let items = match message.content {
-        ClaudeContent::Text(text) => vec![serde_json::json!({"type": "text", "text": text})],
-        ClaudeContent::Array(items) => items,
+    let exported = |item: &serde_json::Value| {
+        matches!(
+            item.get("type").and_then(serde_json::Value::as_str),
+            Some("text" | "thinking")
+        ) || is_tool_payload(item)
     };
+    let items = join_consecutive_text(
+        match message.content {
+            ClaudeContent::Text(text) => vec![serde_json::json!({"type": "text", "text": text})],
+            ClaudeContent::Array(items) => items,
+        }
+        .into_iter()
+        .filter(exported)
+        .collect(),
+        &["text"],
+    );
     let tool_calls = items
         .iter()
         .filter(|item| is_tool_payload(item))
@@ -324,6 +336,7 @@ mod tests {
             is_sidechain: None,
             message: Some(ClaudeMessage {
                 content: ClaudeContent::Array(vec![
+                    serde_json::json!({"type": "text", "text": "Let me think"}),
                     serde_json::json!({"type": "thinking", "thinking": "Weighing two designs"}),
                     serde_json::json!({"type": "redacted_thinking", "data": "opaque"}),
                     serde_json::json!({"type": "text", "text": "Here is the plan"}),
@@ -341,6 +354,10 @@ mod tests {
                 .map(|message| (message.role, message.content.as_str()))
                 .collect::<Vec<_>>(),
             vec![
+                (
+                    MessageRole::Assistant(AssistantOutput::Message),
+                    "Let me think"
+                ),
                 (
                     MessageRole::Assistant(AssistantOutput::Reasoning),
                     "Weighing two designs"
