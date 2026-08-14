@@ -24,7 +24,7 @@
 - Everything the model produced belongs to one assistant turn. No format may present reasoning, answers, or tool exchanges as peers of the user's input.
 - Message text can contain lines that look like Markdown headings, so structure must never be recovered by matching heading text. Machine consumers use `--format json`.
 - Tool records are opt-in. Changing `--include-tool-calls` must rewrite the affected export instead of reusing incompatible sync state.
-- Output directories are merge targets: a pull may create or replace exports for the sessions it processes but must not remove other files, including exports written in the other format.
+- Output directories are merge targets: a pull creates or replaces only the path it derives for a session it processes, and never touches any other file, including exports written in the other format. A file already occupying a derived path is replaced whatever its contents, which is how a truncated or hand-edited export repairs itself.
 - Each export records its own sync state, Markdown in frontmatter and JSON in its top-level fields, so no separate state store exists. Filenames include the provider session ID to preserve identity outside the local history tree.
 - Every export names its provider, so sync-state restoration requires an exact match on provider, session ID, and export format. A file that does not match belongs to someone else and must never be adopted as an export path, because adopting it would overwrite it.
 - A recorded message count that differs from the current parse in either direction means the export is stale and must be rewritten.
