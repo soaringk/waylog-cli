@@ -2,7 +2,7 @@
 
 User-facing features and critical fixes are documented here from version 0.3.0 onward.
 
-## [Unreleased]
+## [0.4.1] - 2026-08-14
 
 ### Fixed
 
