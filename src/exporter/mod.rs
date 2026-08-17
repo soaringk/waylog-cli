@@ -91,8 +91,12 @@ pub(crate) enum Entry<'a> {
     Standalone(&'a ChatMessage),
     /// A run of model output. This is the only turn boundary a provider makes
     /// observable: everything until the conversation returns to the user.
-    AssistantTurn(Vec<&'a ChatMessage>),
+    AssistantTurn(Vec<Part<'a>>),
 }
+
+/// One step of model output. A tool request and its result are one step, so both formats
+/// present a call together with what it returned.
+pub(crate) type Part<'a> = Vec<&'a ChatMessage>;
 
 /// Split a session into entries in recorded order. Model output groups into a turn;
 /// every other record stands where it is, so a later user input stays at the point it
@@ -101,12 +105,36 @@ pub(crate) fn entries(session: &ChatSession, include_tool_calls: bool) -> Vec<En
     let mut entries = Vec::new();
     for message in exported_messages(session, include_tool_calls) {
         match (&message.role, entries.last_mut()) {
-            (MessageRole::Assistant(_), Some(Entry::AssistantTurn(parts))) => parts.push(message),
-            (MessageRole::Assistant(_), _) => entries.push(Entry::AssistantTurn(vec![message])),
+            (MessageRole::Assistant(_), Some(Entry::AssistantTurn(parts))) => {
+                push_output(parts, message)
+            }
+            (MessageRole::Assistant(_), _) => {
+                entries.push(Entry::AssistantTurn(vec![vec![message]]))
+            }
             _ => entries.push(Entry::Standalone(message)),
         }
     }
     entries
+}
+
+/// Add one record of model output to the turn being built. A tool result joins the call
+/// that carries the same id; without a matching id a record stands on its own, in the
+/// order it was recorded, because nothing links it to a call.
+fn push_output<'a>(parts: &mut Vec<Part<'a>>, message: &'a ChatMessage) {
+    if message.role == MessageRole::Assistant(AssistantOutput::Tool) {
+        if let Some(call_id) = message.metadata.tool_call_id.as_deref() {
+            let call = parts.iter_mut().find(|part| {
+                part.len() == 1
+                    && part[0].role == MessageRole::Assistant(AssistantOutput::Tool)
+                    && part[0].metadata.tool_call_id.as_deref() == Some(call_id)
+            });
+            if let Some(call) = call {
+                call.push(message);
+                return;
+            }
+        }
+    }
+    parts.push(vec![message]);
 }
 
 #[cfg(test)]
@@ -132,6 +160,70 @@ mod tests {
             updated_at: None,
             messages: roles.into_iter().map(message).collect(),
         }
+    }
+
+    fn tool(call_id: Option<&str>, content: &str) -> ChatMessage {
+        let mut message = message(MessageRole::Assistant(AssistantOutput::Tool));
+        message.content = content.to_string();
+        message.metadata.tool_call_id = call_id.map(str::to_string);
+        message
+    }
+
+    fn steps(session: &ChatSession) -> Vec<Vec<&str>> {
+        entries(session, true)
+            .iter()
+            .flat_map(|entry| match entry {
+                Entry::Standalone(_) => Vec::new(),
+                Entry::AssistantTurn(parts) => parts
+                    .iter()
+                    .map(|part| part.iter().map(|record| record.content.as_str()).collect())
+                    .collect(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_tool_result_joins_the_call_that_shares_its_id() {
+        let mut session = session([MessageRole::User]);
+        session.messages.extend([
+            tool(Some("a"), "call a"),
+            tool(Some("b"), "call b"),
+            tool(Some("a"), "result a"),
+            tool(Some("b"), "result b"),
+        ]);
+
+        // Providers batch parallel calls, so a result is matched by id rather than by
+        // sitting next to its call.
+        assert_eq!(
+            steps(&session),
+            vec![vec!["call a", "result a"], vec!["call b", "result b"],]
+        );
+    }
+
+    #[test]
+    fn tool_records_without_a_matching_id_stay_in_recorded_order() {
+        let mut session = session([MessageRole::User]);
+        session.messages.extend([
+            tool(None, "first"),
+            tool(None, "second"),
+            tool(Some("a"), "call a"),
+            tool(Some("b"), "unanswered call b"),
+            tool(Some("a"), "result a"),
+            tool(Some("a"), "late record reusing id a"),
+        ]);
+
+        // Nothing links an id-less record to a call, an unanswered call has no result, and
+        // an id already answered does not absorb a third record.
+        assert_eq!(
+            steps(&session),
+            vec![
+                vec!["first"],
+                vec!["second"],
+                vec!["call a", "result a"],
+                vec!["unanswered call b"],
+                vec!["late record reusing id a"],
+            ]
+        );
     }
 
     #[test]

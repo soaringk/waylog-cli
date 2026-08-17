@@ -105,9 +105,11 @@ Markdown is the default because histories are mostly read by people. Programs sh
 }
 ```
 
-Records stay in the order the provider wrote them, which is causal order: input sent while the assistant is working appears between assistant turns rather than folded into an earlier one. To read what the assistant said, take every `parts` entry whose `kind` is `message`. `message_count` counts records, so it equals the number of parts plus the number of user and system turns.
+Records stay in the order the provider wrote them, which is causal order: input sent while the assistant is working appears between assistant turns rather than folded into an earlier one. To read what the assistant said, take every `parts` entry whose `kind` is `message`.
 
-Do not recover structure by matching Markdown headings: message text can contain lines that look exactly like them, so extraction from Markdown is approximate by nature. `--format json` exists for that reason. Absent values stay `null`, and `model`, `tokens`, `tool_call_id`, `tool_calls`, and `thoughts` appear only when the provider recorded them.
+A `tool` part is one exchange: the call in `content` and what it returned in `result`, matched by `tool_call_id`. Providers batch parallel calls, so a result is matched by its id rather than by position. A tool record with no matching id keeps its own part, in recorded order, because nothing links it to a call. `message_count` counts the records a provider wrote, so a paired exchange counts as two.
+
+Do not recover structure by matching Markdown headings: message text can contain lines that look exactly like them, so extraction from Markdown is approximate by nature. `--format json` exists for that reason. Absent values stay `null`, and `result`, `model`, `tokens`, `tool_call_id`, `tool_calls`, and `thoughts` appear only when the provider recorded them.
 
 Both formats hold the same content and use the same filename with a different extension, so one directory can hold both. `waylog run` always writes Markdown.
 

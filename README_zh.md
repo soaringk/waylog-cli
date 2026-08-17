@@ -105,9 +105,11 @@ source 目录可以包含贡献者子目录。每个下载后的 provider 目录
 }
 ```
 
-记录保持 provider 写入的顺序，也就是因果顺序：助手工作期间发来的输入会出现在两个 assistant 轮次之间，而不会被并入前一条。要读助手说过的话，取所有 `kind` 为 `message` 的 `parts`。`message_count` 统计的是记录数，等于全部 parts 数加上 user、system 轮次数。
+记录保持 provider 写入的顺序，也就是因果顺序：助手工作期间发来的输入会出现在两个 assistant 轮次之间，而不会被并入前一条。要读助手说过的话，取所有 `kind` 为 `message` 的 `parts`。
 
-不要靠匹配 Markdown 标题来还原结构：消息正文里可能出现与标题完全相同的行，因此从 Markdown 抽取本质上只能是近似的，这正是 `--format json` 存在的原因。缺失的值保持 `null`；`model`、`tokens`、`tool_call_id`、`tool_calls`、`thoughts` 只在 provider 确实记录时出现。
+一个 `tool` part 就是一次完整交互：`content` 是调用，`result` 是它的返回，两者通过 `tool_call_id` 匹配。provider 会把并行调用成批写入，因此结果按 id 匹配，而不按位置匹配。没有匹配 id 的 tool 记录单独成为一个 part，按记录顺序排列，因为没有任何信息能把它关联到某次调用。`message_count` 统计 provider 写下的记录数，因此一次配对的交互计为两条。
+
+不要靠匹配 Markdown 标题来还原结构：消息正文里可能出现与标题完全相同的行，因此从 Markdown 抽取本质上只能是近似的，这正是 `--format json` 存在的原因。缺失的值保持 `null`；`result`、`model`、`tokens`、`tool_call_id`、`tool_calls`、`thoughts` 只在 provider 确实记录时出现。
 
 两种格式内容一致，文件名相同、仅扩展名不同，因此同一目录可以同时存放两者。`waylog run` 始终输出 Markdown。
 

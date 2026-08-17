@@ -22,8 +22,9 @@
 
 ## Export
 
-- Markdown is for people, JSON for programs. Both render `exporter::entries`, so a format changes presentation only.
+- Markdown is for people, JSON for programs. Both render `exporter::entries`, so a format changes presentation only and neither may show a step the other merges.
 - Everything the model produced belongs to one assistant turn. No format may show reasoning, answers, or tool records as peers of user input.
+- A tool call and the result carrying its id are one step. Match a result by id, never by adjacency, because providers batch parallel calls. A record with no matching id stands alone in recorded order; which end of an exchange it holds is not recorded.
 - Message text can imitate Markdown headings, so never recover structure by matching them. Machine consumers use `--format json`.
 - Tool records are opt-in. Changing `--include-tool-calls` rewrites the affected export.
 - A pull writes only the path it derives for a session it processes, and replaces whatever occupies that path. It touches nothing else, including the other format's exports.

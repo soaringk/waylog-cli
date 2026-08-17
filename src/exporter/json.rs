@@ -1,6 +1,6 @@
 use crate::error::Result;
-use crate::exporter::{entries, project, Entry, ExportHeader};
-use crate::providers::base::{AssistantOutput, ChatMessage, ChatSession, MessageRole};
+use crate::exporter::{entries, project, Entry, ExportHeader, Part};
+use crate::providers::base::{AssistantOutput, ChatSession, MessageRole};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -46,14 +46,17 @@ fn turn_record<'a>(entry: &Entry<'a>) -> TurnRecord<'a> {
         },
         Entry::AssistantTurn(parts) => TurnRecord {
             role: "assistant",
-            timestamp: timestamp(parts[0].timestamp.as_ref()),
+            timestamp: timestamp(parts[0][0].timestamp.as_ref()),
             content: None,
             parts: parts.iter().map(|part| part_record(part)).collect(),
         },
     }
 }
 
-fn part_record(part: &ChatMessage) -> PartRecord<'_> {
+/// Record one step of model output. A tool call that was matched to its result carries
+/// that result alongside it; every other step is a single record.
+fn part_record<'a>(records: &Part<'a>) -> PartRecord<'a> {
+    let part = records[0];
     PartRecord {
         kind: match part.role {
             MessageRole::Assistant(AssistantOutput::Reasoning) => "reasoning",
@@ -62,6 +65,7 @@ fn part_record(part: &ChatMessage) -> PartRecord<'_> {
         },
         timestamp: timestamp(part.timestamp.as_ref()),
         content: &part.content,
+        result: records.get(1).map(|result| result.content.as_str()),
         tool_call_id: part.metadata.tool_call_id.as_deref(),
         model: part.metadata.model.as_deref(),
         tokens: part.metadata.tokens.as_ref().map(|tokens| TokenRecord {
@@ -108,7 +112,11 @@ struct TurnRecord<'a> {
 struct PartRecord<'a> {
     kind: &'static str,
     timestamp: Option<String>,
+    /// This step's own record: for a tool step, the call.
     content: &'a str,
+    /// What a tool call returned, present when an id matched a result to it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -140,7 +148,7 @@ struct HeaderRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::base::{MessageMetadata, TokenUsage};
+    use crate::providers::base::{ChatMessage, MessageMetadata, TokenUsage};
     use serde_json::Value;
     use tempfile::TempDir;
 

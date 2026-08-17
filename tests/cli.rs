@@ -318,9 +318,12 @@ fn json_format_exports_structured_records_beside_markdown() {
         .iter()
         .map(|part| part["kind"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(kinds, ["message", "tool", "tool"]);
+    assert_eq!(kinds, ["message", "tool"]);
     assert_eq!(turns[1]["parts"][0]["content"], "the answer");
+    // A call and the result carrying its id are one step, while message_count above still
+    // counts both records, because that is what the provider recorded.
     assert_eq!(turns[1]["parts"][1]["tool_call_id"], "session-json-tool");
+    assert_eq!(turns[1]["parts"][1]["result"], "file contents");
 
     // Markdown into the same directory leaves the structured export in place.
     pull_qoder_source(current_dir.path(), &session, &output_dir);

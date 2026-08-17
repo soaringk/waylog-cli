@@ -1,7 +1,6 @@
 use crate::exporter::Entry;
 use crate::providers::base::{AssistantOutput, ChatMessage, MessageRole};
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
 
 pub(crate) fn format_entries(entries: &[Entry<'_>]) -> String {
     let mut blocks = Vec::new();
@@ -9,12 +8,8 @@ pub(crate) fn format_entries(entries: &[Entry<'_>]) -> String {
         match entry {
             Entry::Standalone(message) => blocks.push(format_part(&[message], 2)),
             Entry::AssistantTurn(parts) => {
-                blocks.push(heading(2, "🤖 Assistant", parts[0]));
-                blocks.extend(
-                    group_tool_exchanges(parts)
-                        .iter()
-                        .map(|part| format_part(part, 3)),
-                );
+                blocks.push(heading(2, "🤖 Assistant", parts[0][0]));
+                blocks.extend(parts.iter().map(|part| format_part(part, 3)));
             }
         }
     }
@@ -23,27 +18,6 @@ pub(crate) fn format_entries(entries: &[Entry<'_>]) -> String {
         return String::new();
     }
     format!("{}\n", blocks.join("\n\n"))
-}
-
-/// Render a tool request and its result as one block, which reads better than two.
-fn group_tool_exchanges<'a>(parts: &[&'a ChatMessage]) -> Vec<Vec<&'a ChatMessage>> {
-    let mut groups = Vec::<Vec<&ChatMessage>>::new();
-    let mut exchanges = HashMap::<&str, usize>::new();
-
-    for part in parts {
-        if part.role == MessageRole::Assistant(AssistantOutput::Tool) {
-            if let Some(call_id) = part.metadata.tool_call_id.as_deref() {
-                if let Some(index) = exchanges.get(call_id) {
-                    groups[*index].push(part);
-                    continue;
-                }
-                exchanges.insert(call_id, groups.len());
-            }
-        }
-        groups.push(vec![part]);
-    }
-
-    groups
 }
 
 fn heading(level: usize, label: &str, message: &ChatMessage) -> String {

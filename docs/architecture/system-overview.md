@@ -18,7 +18,7 @@ WayLog is a local-first Rust CLI that turns coding-agent histories into readable
 
 - `providers::base::Provider` owns native storage discovery, project matching, session lookup, and conversion into `ChatSession`.
 - `providers::base` models a conversation as ordered records. Everything the model produced carries `MessageRole::Assistant(AssistantOutput)`, so reasoning, answers, and tool exchanges cannot be mistaken for separate speakers.
-- `exporter::entries` derives the turn structure once, so both formats present the same hierarchy.
+- `exporter::entries` derives the whole hierarchy once — turns and the steps within them — so no format can show a step the other merges.
 - Direct source parsing bypasses discovery, treats supplied artifacts as authoritative, and still crosses the same `Provider::parse_session` seam.
 - Provider history availability is independent of the optional CLI launch command, so application-only providers participate in `pull` without pretending to support `run`.
 - Claude-family providers share JSONL parsing and main-session enumeration while keeping product-specific storage discovery behind `Provider`.
@@ -26,8 +26,8 @@ WayLog is a local-first Rust CLI that turns coding-agent histories into readable
 - `Synchronizer` owns provider-independent sync behavior and status reporting.
 - `SessionTracker` reconstructs provider-specific sync state from the exports already on disk, avoiding a second state store, and only considers the format being written.
 - `exporter` owns the format-neutral seam: which messages an export contains, how one is written, and how its recorded sync state is read back.
-- `exporter::markdown` owns the readable representation, including grouping consecutive assistant steps into one turn and nesting reasoning, answers, and tool exchanges beneath it.
-- `exporter::json` owns the structured representation: session metadata plus `turns`, where an assistant turn carries its `parts`.
+- `exporter::markdown` owns the readable representation: it renders the derived hierarchy as headings, nesting reasoning, answers, and tool exchanges beneath one turn. It does not decide the hierarchy.
+- `exporter::json` owns the structured representation: session metadata plus `turns`, where an assistant turn carries its `parts` and a `tool` part carries the call with the `result` it returned.
 - `output` owns human and JSON terminal output.
 
 ## Distribution

@@ -2,6 +2,16 @@
 
 User-facing features and critical fixes are documented here from version 0.3.0 onward.
 
+## [Unreleased]
+
+### Changed
+
+- A tool call and its result are now one `tool` part in `--format json`, matching what the Markdown has always shown. The call stays in `content` and the result it returned appears in `result`. A result is matched by `tool_call_id`, because providers batch parallel calls; a record with no matching id keeps its own part, in recorded order. `message_count` still counts the records a provider wrote, so a paired exchange counts as two.
+
+### Upgrading
+
+This release changes the structured export only. Markdown output is byte-identical, so Markdown histories need nothing. Because pairing does not change `message_count`, existing JSON exports written with `--include-tool-calls` are not stale and an ordinary pull leaves them on the old shape: run `waylog pull --format json --force` once to convert them.
+
 ## [0.4.1] - 2026-08-14
 
 ### Fixed
