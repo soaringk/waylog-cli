@@ -4,26 +4,25 @@
 
 WayLog is a local-first Rust CLI that turns coding-agent histories into readable Markdown, or structured JSON for programs, without changing provider-owned data.
 
-## Modes
+## Export workflow
 
-- `waylog run` launches one agent and keeps its latest session synchronized while the process is active.
 - `waylog pull` recovers sessions associated with the invocation directory and writes to its `.waylog/history/`.
 - `waylog pull --recursive` adds visible descendant projects to that recovery scope, `--hidden` includes hidden descendants, and `--output-dir` explicitly replaces the destination.
 - `waylog pull --provider <provider> --session <id>` targets one session in local provider history and may write to a caller-managed directory.
 - `--source` parses supplied provider artifacts or a downloaded provider directory tree without local session discovery, allowing collectors and a centralized parser to remain separate while preserving upload grouping.
 - `--include-tool-calls` adds calls and results as `Tool` messages, removes stable protocol wrappers for readability, and falls back to the complete native payload when normalization is unsafe.
-- `--format json` writes each session as one structured document instead of Markdown, so consumers read records rather than matching headings. `run` always writes the default Markdown.
+- `--format json` writes each session as one structured document instead of Markdown, so consumers read records rather than matching headings.
 
 ## Core Boundaries
 
 - `providers::base::Provider` owns native storage discovery, project matching, session lookup, and conversion into `ChatSession`.
 - `providers::base` models a conversation as ordered records. Everything the model produced carries `MessageRole::Assistant(AssistantOutput)`, so reasoning, answers, and tool exchanges cannot be mistaken for separate speakers.
 - `exporter::entries` derives the whole hierarchy once — turns and the steps within them — so no format can show a step the other merges.
-- Direct source parsing bypasses discovery, treats supplied artifacts as authoritative, and still crosses the same `Provider::parse_session` seam.
-- Provider history availability is independent of the optional CLI launch command, so application-only providers participate in `pull` without pretending to support `run`.
+- Direct source parsing bypasses discovery, treats supplied artifacts as authoritative, and still crosses the same `Provider::parse_sessions` seam. One native artifact may expand into multiple conversations; per-session failures stay isolated and selected IDs are filtered by the provider. Directory selection stays inside each provider.
 - Claude-family providers share JSONL parsing and main-session enumeration while keeping product-specific storage discovery behind `Provider`.
+- Cursor and all Antigravity surfaces are application-wide. DSH and Grok retain project scope.
 - Qoder is project-scoped, while QoderWork is application-wide and scans its task workspaces once per pull.
-- `Synchronizer` owns provider-independent sync behavior and status reporting.
+- `Synchronizer` owns provider-independent sync behavior and status reporting, comparing rendered content when record counts match so native edits still update exports.
 - `SessionTracker` reconstructs provider-specific sync state from the exports already on disk, avoiding a second state store, and only considers the format being written.
 - `exporter` owns the format-neutral seam: which messages an export contains, how one is written, and how its recorded sync state is read back.
 - `exporter::markdown` owns the readable representation: it renders the derived hierarchy as headings, nesting reasoning, answers, and tool exchanges beneath one turn. It does not decide the hierarchy.
@@ -34,7 +33,7 @@ WayLog is a local-first Rust CLI that turns coding-agent histories into readable
 
 - GitHub Releases provide checksum-verified binaries for macOS, Linux, and Windows on x64 and ARM64 so users do not need a Rust toolchain.
 
-## Evolution Notes
+## Extension points
 
 - Add new agent formats behind `Provider`; do not branch shared synchronization logic for provider-specific behavior.
 - Add new export representations behind `exporter::ExportFormat`; presentation belongs there, never in a provider.

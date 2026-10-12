@@ -252,21 +252,14 @@ pub trait Provider: Send + Sync {
         true
     }
 
-    /// Find the latest session file for the current project
-    async fn find_latest_session(&self, project_path: &Path) -> Result<Option<PathBuf>> {
-        Ok(self
-            .get_all_sessions(project_path)
-            .await?
-            .into_iter()
-            .next())
-    }
-
     /// Find one session by its provider session ID.
     async fn find_session(&self, project_path: &Path, session_id: &str) -> Result<Option<PathBuf>> {
         for session_path in self.get_all_sessions(project_path).await? {
-            let session = self.parse_session(&session_path).await?;
-            if session.session_id == session_id {
-                return Ok(Some(session_path));
+            let sessions = self.parse_sessions(&session_path, Some(session_id)).await?;
+            for session in sessions {
+                if session?.session_id == session_id {
+                    return Ok(Some(session_path));
+                }
             }
         }
         Ok(None)
@@ -275,16 +268,39 @@ pub trait Provider: Send + Sync {
     /// Parse a session file and return a chat session
     async fn parse_session(&self, file_path: &Path) -> Result<ChatSession>;
 
+    /// Expand selected conversations, isolating session failures from artifact failures.
+    async fn parse_sessions(
+        &self,
+        file_path: &Path,
+        session_id: Option<&str>,
+    ) -> Result<Vec<Result<ChatSession>>> {
+        let session = self.parse_session(file_path).await;
+        if session
+            .as_ref()
+            .is_ok_and(|session| session_id.is_some_and(|id| session.session_id != id))
+        {
+            return Ok(Vec::new());
+        }
+        Ok(vec![session])
+    }
+
+    /// Select native artifacts from a supplied directory tree, excluding auxiliary files
+    /// and obsolete generations. A supplied single file bypasses this selection.
+    async fn select_source_paths(&self, paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+        Ok(paths
+            .into_iter()
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "jsonl")
+            })
+            .collect())
+    }
+
     /// Get all session files for a specific project
     async fn get_all_sessions(&self, project_path: &Path) -> Result<Vec<PathBuf>>;
 
     /// Check whether provider history is available.
     fn has_history(&self) -> bool;
-
-    /// Get the CLI command when this provider can be launched by `waylog run`.
-    fn run_command(&self) -> Option<&str> {
-        None
-    }
 }
 
 #[cfg(test)]

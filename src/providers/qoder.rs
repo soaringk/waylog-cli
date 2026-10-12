@@ -1,6 +1,6 @@
 use crate::error::Result;
 use crate::providers::base::{ChatSession, Provider};
-use crate::providers::claude::{main_session_files, parse_jsonl_session};
+use crate::providers::claude::{main_session_files, parse_jsonl_session, select_main_source_paths};
 use crate::utils::path;
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -53,6 +53,10 @@ impl Provider for QoderProvider {
 
     async fn parse_session(&self, file_path: &Path) -> Result<ChatSession> {
         parse_jsonl_session(file_path, self.name()).await
+    }
+
+    async fn select_source_paths(&self, paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+        select_main_source_paths(paths).await
     }
 
     async fn get_all_sessions(&self, project_path: &Path) -> Result<Vec<PathBuf>> {

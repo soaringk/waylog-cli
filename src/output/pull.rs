@@ -32,7 +32,7 @@ impl Output {
 
         if !self.quiet() {
             if self.json() {
-                self.print_json_internal("pull_start", &message)?;
+                self.print_json("pull_start", &message)?;
             } else {
                 writeln!(self.stdout(), "{}", message)?;
             }
@@ -44,7 +44,7 @@ impl Output {
     pub fn provider_header(&mut self, provider: &str, count: usize) -> io::Result<()> {
         if !self.quiet() {
             if self.json() {
-                self.print_json_internal(
+                self.print_json(
                     "provider_header",
                     &format!("{}: {} sessions", provider, count),
                 )?;
@@ -59,7 +59,7 @@ impl Output {
     pub fn synced(&mut self, filename: &str, new_messages: usize, verbose: bool) -> io::Result<()> {
         if !self.quiet() && verbose {
             if self.json() {
-                self.print_json_internal(
+                self.print_json(
                     "synced",
                     &format!("{}: {} new messages", filename, new_messages),
                 )?;
@@ -82,7 +82,7 @@ impl Output {
     pub fn up_to_date(&mut self, filename: &str, verbose: bool) -> io::Result<()> {
         if !self.quiet() && verbose {
             if self.json() {
-                self.print_json_internal("up_to_date", filename)?;
+                self.print_json("up_to_date", filename)?;
             } else {
                 self.stdout()
                     .set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
@@ -96,7 +96,7 @@ impl Output {
     /// Print failed status (red, always shown)
     pub fn failed(&mut self, filename: &str, error: &str) -> io::Result<()> {
         if self.json() {
-            self.print_json_internal("failed", &format!("{}: {}", filename, error))?;
+            self.print_json("failed", &format!("{}: {}", filename, error))?;
         } else {
             self.stderr()
                 .set_color(ColorSpec::new().set_fg(Some(Color::Red)))?;
@@ -110,7 +110,7 @@ impl Output {
     pub fn skipped(&mut self, filename: &str, verbose: bool) -> io::Result<()> {
         if !self.quiet() && verbose {
             if self.json() {
-                self.print_json_internal("skipped", filename)?;
+                self.print_json("skipped", filename)?;
             } else {
                 self.stdout()
                     .set_color(ColorSpec::new().set_intense(true))?;
@@ -134,7 +134,7 @@ impl Output {
     ) -> io::Result<()> {
         if !self.quiet() {
             if self.json() {
-                self.print_json_internal(
+                self.print_json(
                     "summary",
                     &format!(
                         "{} synced, {} up to date; history: {}",

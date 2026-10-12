@@ -1,6 +1,14 @@
 version: 1
 documents:
   - kind: architecture
+    scope: conversation-language
+    path: docs/architecture/glossary.md
+    purpose: Canonical terms for native histories and exported conversations.
+    query_tags:
+      - domain
+      - sessions
+      - providers
+  - kind: architecture
     scope: system-overview
     path: docs/architecture/system-overview.md
     purpose: Current structure, boundaries, and evolution context.
@@ -19,7 +27,7 @@ documents:
   - kind: decision
     scope: decision-log
     path: docs/decisions/decision-log.md
-    purpose: Durable implementation or design decisions.
+    purpose: Current design principles and their rationale.
     query_tags:
       - decisions
       - rationale
@@ -60,3 +68,10 @@ documents:
     query_tags:
       - changelog
       - releases
+  - kind: architecture
+    scope: standalone-source-imports
+    path: docs/architecture/source-imports.md
+    purpose: Directory imports, session selection and optional project metadata.
+    query_tags:
+      - source
+      - ingestion

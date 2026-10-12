@@ -5,7 +5,7 @@
 
 **无缝同步、保留并本地化版本控制你的 AI 编程对话历史。**
 
-WayLog CLI 是一个轻量级的工具，自动捕捉并存档受支持的 AI 编程会话，将其导出为整洁、可搜索的本地 Markdown 文件。不要再因为会话过期而丢失上下文——WayLog CLI 帮你实现 AI 历史的本地所有权。
+WayLog CLI 是一个轻量级的工具，导出受支持的 AI 编程会话历史，将其导出为整洁、可搜索的本地 Markdown 文件。不要再因为会话过期而丢失上下文——WayLog CLI 帮你实现 AI 历史的本地所有权。
 
 [English](README.md) | [中文文档](README_zh.md)
 
@@ -13,7 +13,6 @@ WayLog CLI 是一个轻量级的工具，自动捕捉并存档受支持的 AI �
 
 ## ✨ 特性
 
-- **🔄 自动同步**：`run` 会定期同步最新会话，并在 agent 退出时执行最终同步。
 - **📦 项目历史恢复**：`pull` 恢复各工具关联到当前项目的会话。
 - **🗂️ 工作区历史恢复**：`pull --recursive` 纳入可见子项目，并把会话聚合到当前项目的 WayLog 历史中。
 - **📝 Markdown 原生**：所有历史记录均保存为带 Frontmatter 元数据的高质量 Markdown 文件。
@@ -36,18 +35,7 @@ irm https://raw.githubusercontent.com/soaringk/waylog-cli/main/scripts/install.p
 
 ## 💡 使用方法
 
-### 1. 同步运行 Agent (`run`)
-
-使用 `waylog run` 代替直接调用 AI 工具。WayLog 会启动代理并持续同步它的对话历史。
-
-```bash
-# 可将 claude 替换为其他 CLI provider；Qoder 和 QoderWork 仅支持 pull
-waylog run claude
-```
-
-![WayLog Run Demo](demo/run.gif)
-
-### 2. 全量同步 / 恢复历史 (`pull`)
+### 全量同步 / 恢复历史 (`pull`)
 
 `pull` 读取当前项目并写入其 `.waylog/history/`，不受父目录影响。`--recursive` 会额外扫描可见子项目并汇总到同一输出。使用 `--hidden` 纳入隐藏子目录，或使用 `--output-dir` 替换输出目录。
 
@@ -111,7 +99,7 @@ source 目录可以包含贡献者子目录。每个下载后的 provider 目录
 
 不要靠匹配 Markdown 标题来还原结构：消息正文里可能出现与标题完全相同的行，因此从 Markdown 抽取本质上只能是近似的，这正是 `--format json` 存在的原因。缺失的值保持 `null`；`result`、`model`、`tokens`、`tool_call_id`、`tool_calls`、`thoughts` 只在 provider 确实记录时出现。
 
-两种格式内容一致，文件名相同、仅扩展名不同，因此同一目录可以同时存放两者。`waylog run` 始终输出 Markdown。
+两种格式内容一致，文件名相同、仅扩展名不同，因此同一目录可以同时存放两者。
 
 ### 会话结构
 
@@ -131,15 +119,38 @@ source 目录可以包含贡献者子目录。每个下载后的 provider 目录
 
 | 供应商 | 状态 | 描述 |
 |----------|--------|-------------|
-| **Antigravity** | 🚧 Beta | 支持 Antigravity CLI。 |
+| **Antigravity** | 🚧 Beta | CLI（`antigravity`）、2.0（`antigravity-2`）与 IDE（`antigravity-ide`）；读取各自 brain 目录中的全部会话。 |
 | **Claude Code** | 🚧 Beta | 支持 Anthropic 的 `claude` 命令行工具。 |
 | **Gemini CLI** | 🚧 Beta | 支持 Google 的 Gemini 命令行工具。 |
 | **Codex** | 🚧 Beta | 支持 OpenAI Codex CLI。 |
-| **OpenCode** | 🚧 Beta | 读取本地 SQLite 会话和官方 JSON 会话导出。 |
-| **Qoder** | 🚧 Beta | 仅支持 pull；从 `~/.qoder/projects/` 读取当前项目的 Qoder IDE 会话。 |
-| **QoderWork** | 🚧 Beta | 仅支持 pull；从 `~/.qoderwork/projects/` 读取应用内全部 QoderWork 任务。 |
+| **OpenCode** | 🚧 Beta | 读取本地 SQLite 会话、指定的 SQLite 数据库及官方 JSON 会话导出。 |
+| **Cursor** | 🚧 Beta | 只读访问应用级 `state.vscdb`，展开独立会话，保留原生顺序、思考和工具记录。 |
+| **DeepSeek Harness** | 🚧 Beta | `dsh`；读取 `~/.dsh/sessions/` 中当前项目的最新代际 JSONL，支持 Zstandard 压缩及原生压缩整理。 |
+| **Grok Build** | 🚧 Beta | `grok`；读取 `~/.grok/sessions/` 中当前项目的 `updates.jsonl` 与 `summary.json`，重放流式消息和 rewind。 |
+| **Qoder** | 🚧 Beta | 从 `~/.qoder/projects/` 读取当前项目的 Qoder IDE 会话。 |
+| **QoderWork** | 🚧 Beta | 从 `~/.qoderwork/projects/` 读取应用内全部 QoderWork 任务。 |
+
+Claude 系列的源目录扫描会排除子会话记录。显式导入子会话或 sidechain 也会报错，因为它们可能复用父会话身份。
 
 Qoder 按当前项目查找会话。QoderWork 任务通常没有工作目录，因此 `waylog pull --provider qoderwork` 会把全部 QoderWork 会话汇总到当前 WayLog 历史目录。
+
+Codex 同时读取 `~/.codex/sessions/` 和 `~/.codex/archived_sessions/`，只查找当前项目的会话。结构化导出保留每轮上下文中记录的模型。仅包含事件消息的会话也可导出；如果会话提供 response items，则使用该记录流，不重复加入镜像事件消息。
+
+Gemini 支持 JSON 快照和 JSONL 日志，按原记录顺序重放消息替换、完整检查点、局部修改及 rewind。如果旧 JSON 快照与对应的新 JSONL 日志共存，发现阶段会在迁移尚未完成时保留更完整的旧快照；新日志中明确的修改或 rewind 则以日志为准，即使消息变少。`--source` 指定的文件始终按提供内容解析。优先使用非空的 `displayContent`，保留已记录的思考摘要，并在 `--include-tool-calls` 模式下导出工具调用和结果。缺失或无效的时间保持为空；项目路径从 `.project_root` 读取，不把哈希值当作工作目录。子 Agent 会话不会混入主会话。
+
+JSONL 解析器只忽略没有换行结尾、尚未写完整的最后一条 JSON 记录。其他损坏会使该会话导出失败，并保留原导出文件。普通 pull 会比较消息数量相同的导出内容，因此正文和元数据变化也会更新。已有会话经 rewind 清空后，导出会更新为空，不保留过期回答；其他文件不受影响。
+
+Antigravity 的三个产品目录分别是 `~/.gemini/antigravity-cli/`、`~/.gemini/antigravity/` 和 `~/.gemini/antigravity-ide/`。它们按应用范围发现会话，未记录项目路径时保持为空。CLI 的 `history.jsonl` 或最近会话缓存可补充项目路径，项目映射缺失或不可读均不会阻止正文导出。
+
+收集 Antigravity 历史时，需保留产品目录下的 `brain/<session-id>/.system_generated/logs/transcript[_full].jsonl` 结构。需要项目路径时，同时保留与 `brain/` 同级的 `history.jsonl` 或缓存。无法确定身份的散落 transcript 会报错；元数据只从所提供的目录树读取。
+
+`--source` 指定单个文件时按原样解析；指定目录时由 provider 筛选原生历史文件，忽略辅助文件并选择有效代际。一个数据库可以导出多个独立会话；`--session` 可进一步按 ID 选取其中一个，未找到会报错。数据库中的损坏会话单独报错，不妨碍有效会话导出。
+
+```bash
+waylog pull --provider cursor --format json
+waylog pull --provider dsh --source /path/to/dsh/sessions --include-tool-calls
+waylog pull --provider cursor --source /path/to/state.vscdb --session CONVERSATION_ID
+```
 
 ### 开发构建
 

@@ -23,15 +23,6 @@ pub enum WaylogError {
     #[error("Path error: {0}")]
     PathError(String),
 
-    #[error("Missing required argument <AGENT>")]
-    MissingAgent,
-
-    #[error("{0} is not installed or not in PATH")]
-    AgentNotInstalled(String),
-
-    #[error("Child process exited with code {0}")]
-    ChildProcessFailed(i32),
-
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -41,33 +32,21 @@ impl WaylogError {
     pub fn exit_code(&self) -> i32 {
         match self {
             // Command line usage errors
-            WaylogError::MissingAgent | WaylogError::ProviderNotFound(_) => exitcode::USAGE,
+            WaylogError::ProviderNotFound(_) => exitcode::USAGE,
             // Data format errors
             WaylogError::Json(_) => exitcode::DATAERR,
             // Input file/resource errors
             WaylogError::SessionNotFound { .. } | WaylogError::Io(_) => exitcode::NOINPUT,
-            // Service unavailable
-            WaylogError::AgentNotInstalled(_) => exitcode::UNAVAILABLE,
             // Internal software errors
             WaylogError::AllSessionsFailed(_)
             | WaylogError::PathError(_)
             | WaylogError::Internal(_) => exitcode::SOFTWARE,
-            // Child process exit code (propagate directly)
-            WaylogError::ChildProcessFailed(code) => *code,
         }
     }
 
-    /// Check if this error type already has user-friendly output displayed
-    /// Some errors (like MissingAgent, ProviderNotFound, AgentNotInstalled) are
-    /// already displayed via output.error() in command handlers, so we shouldn't
-    /// display them again in main.rs
+    /// Provider validation reports its error before initialization.
     pub fn is_already_displayed(&self) -> bool {
-        matches!(
-            self,
-            WaylogError::MissingAgent
-                | WaylogError::ProviderNotFound(_)
-                | WaylogError::AgentNotInstalled(_)
-        )
+        matches!(self, WaylogError::ProviderNotFound(_))
     }
 }
 

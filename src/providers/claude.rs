@@ -1,3 +1,4 @@
+use super::jsonl::JsonlReader;
 use crate::error::{Result, WaylogError};
 use crate::providers::base::*;
 use crate::utils::path;
@@ -53,33 +54,54 @@ pub(super) async fn main_session_files(directories: &[PathBuf]) -> Result<Vec<Pa
         .collect())
 }
 
+pub(super) async fn select_main_source_paths(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+    let mut selected = Vec::new();
+    for path in paths {
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+            && !is_subagent_path(&path)
+            && is_main_session(&path).await?
+        {
+            selected.push(path);
+        }
+    }
+    Ok(selected)
+}
+
+fn is_subagent_path(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == "subagents")
+}
+
+fn sidechain_identity_error(path: &Path) -> WaylogError {
+    WaylogError::PathError(format!(
+        "Cannot export sidechain transcript {} without an independent session identity",
+        path.display()
+    ))
+}
+
 pub(super) async fn parse_jsonl_session(
     file_path: &Path,
     provider_name: &str,
 ) -> Result<ChatSession> {
-    let file = fs::File::open(file_path).await?;
-    let reader = BufReader::new(file);
-    let mut lines = reader.lines();
+    if is_subagent_path(file_path) {
+        return Err(sidechain_identity_error(file_path));
+    }
+    let mut records = JsonlReader::open(file_path).await?;
 
     let mut messages = Vec::new();
     let mut session_id = String::new();
     let mut project_path = PathBuf::new();
 
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
+    while let Some(event) = records.next::<ClaudeEvent>().await? {
+        if event.is_sidechain == Some(true) {
+            return Err(sidechain_identity_error(file_path));
         }
-
-        let event: ClaudeEvent = serde_json::from_str(&line).map_err(WaylogError::Json)?;
-
         if session_id.is_empty() {
-            session_id = event.session_id.clone().unwrap_or_else(|| {
-                file_path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .unwrap_or("unknown")
-                    .to_string()
-            });
+            if let Some(id) = event.session_id.as_ref().filter(|id| !id.is_empty()) {
+                session_id = id.clone();
+            }
         }
         if project_path.as_os_str().is_empty() {
             if let Some(cwd) = &event.cwd {
@@ -91,6 +113,14 @@ pub(super) async fn parse_jsonl_session(
             let parsed = parse_messages(event)?;
             messages.extend(parsed);
         }
+    }
+
+    if session_id.is_empty() {
+        session_id = file_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("unknown")
+            .to_string();
     }
 
     let (started_at, updated_at) = message_time_range(&messages);
@@ -125,12 +155,12 @@ impl Provider for ClaudeProvider {
         parse_jsonl_session(file_path, self.name()).await
     }
 
-    fn has_history(&self) -> bool {
-        self.data_dir().is_ok_and(|directory| directory.exists())
+    async fn select_source_paths(&self, paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+        select_main_source_paths(paths).await
     }
 
-    fn run_command(&self) -> Option<&str> {
-        Some("claude")
+    fn has_history(&self) -> bool {
+        self.data_dir().is_ok_and(|directory| directory.exists())
     }
 }
 
@@ -408,5 +438,81 @@ mod tests {
         );
         assert_eq!(messages[2].metadata.tool_call_id.as_deref(), Some("tool-1"));
         assert!(messages[2].content.contains("file contents"));
+    }
+
+    #[tokio::test]
+    async fn uploaded_histories_use_first_native_identity_after_metadata() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let file = directory.path().join("renamed-upload.jsonl");
+        let events = [
+            serde_json::json!({"type":"file-history-snapshot","snapshot":{}}),
+            serde_json::json!({"type":"user","sessionId":"native-id","message":{"content":"request"}}),
+            serde_json::json!({"type":"assistant","sessionId":"replayed-id","message":{"content":"answer"}}),
+        ];
+        fs::write(
+            &file,
+            events
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .await
+        .unwrap();
+        for provider in ["claude", "qoder", "qoderwork"] {
+            let session = parse_jsonl_session(&file, provider).await.unwrap();
+            assert_eq!(session.session_id, "native-id");
+            assert_eq!(session.messages.len(), 2);
+        }
+        fs::write(
+            &file,
+            "{\"type\":\"user\",\"message\":{\"content\":\"request\"}}",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            parse_jsonl_session(&file, "claude")
+                .await
+                .unwrap()
+                .session_id,
+            "renamed-upload"
+        );
+    }
+
+    #[tokio::test]
+    async fn directory_imports_exclude_children_without_hiding_corrupt_main_sessions() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let nested = directory.path().join("subagents/child.jsonl");
+        fs::create_dir_all(nested.parent().unwrap()).await.unwrap();
+        let main = directory.path().join("parent.jsonl");
+        let child = directory.path().join("child.jsonl");
+        let corrupt = directory.path().join("corrupt.jsonl");
+        fs::write(&main, "{\"type\":\"user\",\"isSidechain\":false,\"sessionId\":\"parent\",\"message\":{\"content\":\"parent\"}}")
+            .await.unwrap();
+        fs::write(&child, "{\"type\":\"user\",\"isSidechain\":true,\"sessionId\":\"parent\",\"message\":{\"content\":\"child\"}}")
+            .await.unwrap();
+        fs::write(
+            &nested,
+            "{\"type\":\"user\",\"sessionId\":\"parent\",\"message\":{\"content\":\"child\"}}",
+        )
+        .await
+        .unwrap();
+        fs::write(&corrupt, "invalid json\n").await.unwrap();
+        for provider in ["claude", "qoder", "qoderwork"] {
+            let adapter = crate::providers::get_provider(provider).unwrap();
+            let selected = adapter
+                .select_source_paths(vec![
+                    main.clone(),
+                    child.clone(),
+                    nested.clone(),
+                    corrupt.clone(),
+                ])
+                .await
+                .unwrap();
+            assert_eq!(selected, vec![main.clone(), corrupt.clone()]);
+            assert!(adapter.parse_session(&corrupt).await.is_err());
+            assert!(adapter.parse_session(&child).await.is_err());
+            assert!(adapter.parse_session(&nested).await.is_err());
+        }
     }
 }

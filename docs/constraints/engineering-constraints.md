@@ -5,13 +5,16 @@
 - Never mutate provider-owned history; database-backed providers must use read-only connections.
 - Project-scoped providers must limit discovery to the requested project; application-wide providers must declare global scope and be scanned once per pull.
 - `--recursive` broadens lookup to visible descendant projects without changing the output root; `--hidden` is required to traverse hidden descendants, and `.waylog` output trees are always skipped.
-- `--source` bypasses local session discovery, recursively scans regular files below the supplied provider directory, fails when it finds none, and rebuilds supplied sessions even when their message count is unchanged.
-- Latest-session discovery must search the provider's complete history scope; storage date partitions describe session creation, not recent activity.
-- Session identity comes from the parsed file's own first metadata record, so history replayed inside a resumed or forked session cannot redirect output to another session's export.
+- `--source` bypasses local session discovery, lets the provider select current native artifacts below the supplied directory, fails when it finds none, and rebuilds supplied sessions even when their message count is unchanged.
+- A native artifact may contain multiple independent sessions. Batch import expands all of them; explicit session selection exports only the matching ID and fails when absent.
+- Discovery searches the provider's complete history scope; storage date partitions describe session creation, not recent activity.
+- Session identity comes from native metadata or an identity-bearing native storage path. For replayed histories, use the recording's own first session metadata; embedded ancestor history must not redirect an export.
 
 ## Parsing
 
 - Never fabricate content. Absent values stay `null`, timestamps never fall back to wall-clock time, and unreadable reasoning stays missing.
+- Ignore only an unterminated final JSONL record whose parse error is unexpected EOF; committed incomplete records and other corruption fail the session.
+- Replay provider-defined replacements, checkpoints, patches and rewinds before export. Do not sort surviving records by timestamp.
 - Reproduce provider text exactly. Add spacing around a record, never inside it; trailing whitespace can carry meaning.
 - Keep records in recorded order for every provider. Order is causal order: input arriving mid-turn must stay where it landed, or nothing explains why the assistant changed course.
 - One request is one message: join its text blocks. Only a block WayLog also exports, such as reasoning or a tool record, splits them.
@@ -30,14 +33,14 @@
 - A pull writes only the path it derives for a session it processes, and replaces whatever occupies that path. It touches nothing else, including the other format's exports.
 - Each export carries its own sync state: Markdown in frontmatter, JSON in top-level fields. There is no second store.
 - Restoring that state requires an exact match on provider, session ID, and format. A file that does not match is another tool's, and adopting it would overwrite it.
-- A message count that differs from the current parse in either direction means the export is stale.
-- Exports carry no layout version, so a structural change reaches old files only when their count also changed. Such releases tell users to run `--force` once. Do not add a discriminator that depends on remembering to bump it.
-- Sync-state decisions live in `Synchronizer`, so all modes behave alike. Modes differ only in which sessions they select and whether they force.
+- A different message count means the export is stale; equal-count exports must also match the current rendered content. This catches edits, metadata changes and layout updates without a second state store or layout version.
+- An empty parse does not create a new export. When a previously exported session becomes empty, rewrite its tracked export to remove stale content.
+- Sync-state decisions live in `Synchronizer`; source selection and forced rebuilding are independent of export representation.
 
 ## Compatibility
 
 - Support macOS, Linux, and Windows on x64 and ARM64, with platform-specific code behind `cfg` boundaries.
-- Treat provider formats as external contracts and support coexisting real formats when necessary.
+- Target the latest provider implementation and verify its native format. Backward compatibility is optional; retain it only when it adds little complexity and does not weaken current-format correctness. Old-version coverage is not a release requirement.
 - Keep `README.md` and `README_zh.md` behaviorally aligned.
 - `src/cli.rs` must not reference the rest of the crate; `build.rs` compiles it standalone to render the man page.
 
@@ -46,6 +49,6 @@
 - Tests use synthetic fixtures and temporary directories, never a contributor's actual agent histories, unless otherwise instructed.
 - Process-level CLI assertions belong in Rust integration tests so the normal platform matrix covers them.
 - CI and release build jobs are read-only; only release publishing may receive `contents: write`.
-- Keep documentation concise, intention-led, and unwrapped in source; keep chronology in worklogs.
+- Keep documentation concise, intention-led, and unwrapped in source; keep chronology in worklogs. Code and its comments describe current behavior and intention, with code evolution recorded in commit messages and `CHANGELOG.md`.
 - Keep documentation self-contained: describe WayLog behavior and boundaries without naming downstream integration repositories.
 - Before handoff, run `cargo fmt --all -- --check`, `cargo test --all-features`, `cargo clippy --all-features -- -D warnings`, and `git diff --check`.

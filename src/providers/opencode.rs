@@ -46,8 +46,12 @@ impl OpenCodeProvider {
     }
 
     fn connection(&self) -> Result<Connection> {
+        Self::connection_at(&self.database_path()?)
+    }
+
+    fn connection_at(database: &Path) -> Result<Connection> {
         let connection = Connection::open_with_flags(
-            self.database_path()?,
+            database,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(sqlite_error)?;
@@ -224,6 +228,66 @@ impl OpenCodeProvider {
         Ok(messages)
     }
 
+    fn parse_database_session(
+        &self,
+        connection: &Connection,
+        session_id: &str,
+    ) -> Result<ChatSession> {
+        let session = connection
+            .query_row(
+                "SELECT directory, time_created, time_updated FROM session WHERE id = ?1",
+                [session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(sqlite_error)?
+            .ok_or_else(|| {
+                WaylogError::PathError(format!("OpenCode session not found: {session_id}"))
+            })?;
+
+        let mut statement = connection
+            .prepare(
+                "SELECT id, time_created, data FROM message \
+                 WHERE session_id = ?1 ORDER BY time_created, id",
+            )
+            .map_err(sqlite_error)?;
+        let rows = statement
+            .query_map([session_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(sqlite_error)?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            let (message_id, time_created, data) = row.map_err(sqlite_error)?;
+            messages.extend(self.parse_message(
+                connection,
+                message_id,
+                Some(time_created),
+                data,
+            )?);
+        }
+
+        Ok(ChatSession {
+            session_id: session_id.to_string(),
+            provider: self.name().to_string(),
+            project_path: PathBuf::from(session.0),
+            started_at: datetime_from_millis(session.1),
+            updated_at: datetime_from_millis(session.2),
+            messages,
+        })
+    }
+
     async fn parse_export(&self, path: &Path) -> Result<ChatSession> {
         let export: Value = serde_json::from_slice(&tokio::fs::read(path).await?)?;
         let info = export.get("info").ok_or_else(|| {
@@ -283,14 +347,6 @@ impl Provider for OpenCodeProvider {
         "opencode"
     }
 
-    async fn find_latest_session(&self, project_path: &Path) -> Result<Option<PathBuf>> {
-        self.session_ids_for_project(project_path)?
-            .into_iter()
-            .next()
-            .map(|session_id| self.session_path(&session_id))
-            .transpose()
-    }
-
     async fn find_session(&self, project_path: &Path, session_id: &str) -> Result<Option<PathBuf>> {
         let connection = self.connection()?;
         let found = connection
@@ -310,6 +366,17 @@ impl Provider for OpenCodeProvider {
         if session_path
             .extension()
             .and_then(|extension| extension.to_str())
+            == Some("db")
+        {
+            let mut sessions = self.parse_sessions(session_path, None).await?;
+            if sessions.len() != 1 {
+                return Err(WaylogError::PathError("OpenCode database requires batch import when it contains zero or multiple conversations".into()));
+            }
+            return sessions.remove(0);
+        }
+        if session_path
+            .extension()
+            .and_then(|extension| extension.to_str())
             == Some("json")
         {
             return self.parse_export(session_path).await;
@@ -317,59 +384,59 @@ impl Provider for OpenCodeProvider {
 
         let session_id = Self::session_id_from_path(session_path)?;
         let connection = self.connection()?;
-        let session = connection
-            .query_row(
-                "SELECT directory, time_created, time_updated FROM session WHERE id = ?1",
-                [session_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(sqlite_error)?
-            .ok_or_else(|| {
-                WaylogError::PathError(format!("OpenCode session not found: {session_id}"))
-            })?;
+        self.parse_database_session(&connection, session_id)
+    }
 
-        let mut statement = connection
-            .prepare(
-                "SELECT id, time_created, data FROM message \
-                 WHERE session_id = ?1 ORDER BY time_created, id",
-            )
-            .map_err(sqlite_error)?;
-        let rows = statement
-            .query_map([session_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(sqlite_error)?;
-
-        let mut messages = Vec::new();
-        for row in rows {
-            let (message_id, time_created, data) = row.map_err(sqlite_error)?;
-            messages.extend(self.parse_message(
-                &connection,
-                message_id,
-                Some(time_created),
-                data,
-            )?);
+    async fn parse_sessions(
+        &self,
+        source_path: &Path,
+        session_id: Option<&str>,
+    ) -> Result<Vec<Result<ChatSession>>> {
+        if source_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("db")
+        {
+            let session = self.parse_session(source_path).await;
+            if session
+                .as_ref()
+                .is_ok_and(|session| session_id.is_some_and(|id| session.session_id != id))
+            {
+                return Ok(Vec::new());
+            }
+            return Ok(vec![session]);
         }
+        let connection = Self::connection_at(source_path)?;
+        connection.execute_batch("BEGIN").map_err(sqlite_error)?;
+        let mut query = connection
+            .prepare("SELECT id FROM session WHERE (?1 IS NULL OR id = ?1) ORDER BY time_updated DESC, id DESC")
+            .map_err(sqlite_error)?;
+        let ids = query
+            .query_map([session_id], |row| row.get::<_, String>(0))
+            .map_err(sqlite_error)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite_error)?;
+        Ok(ids
+            .into_iter()
+            .map(|id| {
+                self.parse_database_session(&connection, &id)
+                    .map_err(|error| {
+                        WaylogError::Internal(format!("OpenCode session {id}: {error}"))
+                    })
+            })
+            .collect())
+    }
 
-        Ok(ChatSession {
-            session_id: session_id.to_string(),
-            provider: self.name().to_string(),
-            project_path: PathBuf::from(session.0),
-            started_at: datetime_from_millis(session.1),
-            updated_at: datetime_from_millis(session.2),
-            messages,
-        })
+    async fn select_source_paths(&self, paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+        Ok(paths
+            .into_iter()
+            .filter(|path| {
+                matches!(
+                    path.extension().and_then(|extension| extension.to_str()),
+                    Some("db" | "json")
+                )
+            })
+            .collect())
     }
 
     async fn get_all_sessions(&self, project_path: &Path) -> Result<Vec<PathBuf>> {
@@ -381,10 +448,6 @@ impl Provider for OpenCodeProvider {
 
     fn has_history(&self) -> bool {
         self.database_path().is_ok_and(|path| path.is_file())
-    }
-
-    fn run_command(&self) -> Option<&str> {
-        Some("opencode")
     }
 }
 
@@ -661,5 +724,70 @@ mod tests {
         assert!(session.messages[2].content.contains("src/main.rs"));
         assert!(session.messages[2].content.contains("file contents"));
         assert_eq!(session.messages[3].content, "Done");
+    }
+    #[tokio::test]
+    async fn imports_all_sessions_from_supplied_database_without_local_history() {
+        let external = TempDir::new().unwrap();
+        let local = TempDir::new().unwrap();
+        let project = external.path().join("project");
+        create_fixture(external.path(), &project);
+        let database = external.path().join("opencode.db");
+        let connection = Connection::open(&database).unwrap();
+        connection.execute("INSERT INTO session VALUES ('ses_second','/other/project',1700000000000,1700000003000)",[]).unwrap();
+        connection
+            .execute(
+                "INSERT INTO message VALUES ('msg_second','ses_second',1700000000000,?1)",
+                [r#"{"role":"user"}"#],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO part VALUES ('prt_second','msg_second','ses_second',?1)",
+                [r#"{"type":"text","text":"external second  "}"#],
+            )
+            .unwrap();
+        drop(connection);
+        let before = std::fs::read(&database).unwrap();
+        let provider = OpenCodeProvider::with_data_dir(local.path().to_path_buf());
+        assert!(!provider.has_history());
+        let sessions = provider
+            .parse_sessions(&database, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id, "ses_second");
+        assert_eq!(sessions[0].messages[0].content, "external second  ");
+        assert_eq!(sessions[0].project_path, PathBuf::from("/other/project"));
+        assert_eq!(sessions[1].messages.len(), 4);
+        assert!(provider.parse_session(&database).await.is_err());
+        assert_eq!(before, std::fs::read(&database).unwrap());
+        assert!(!local.path().join("opencode.db").exists());
+        let selected = provider
+            .select_source_paths(vec![
+                database.clone(),
+                external.path().join("opencode.db-wal"),
+                external.path().join("opencode.db-shm"),
+                external.path().join("export.json"),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(
+            selected,
+            vec![database, external.path().join("export.json")]
+        );
+    }
+
+    #[tokio::test]
+    async fn supplied_missing_database_is_never_created() {
+        let directory = TempDir::new().unwrap();
+        let database = directory.path().join("missing.db");
+        assert!(OpenCodeProvider::new()
+            .parse_sessions(&database, None)
+            .await
+            .is_err());
+        assert!(!database.exists());
     }
 }

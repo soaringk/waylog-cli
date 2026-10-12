@@ -6,13 +6,12 @@ mod init;
 mod output;
 mod providers;
 mod session;
-pub mod synchronizer;
+mod synchronizer;
 mod utils;
-mod watcher;
 
 use clap::Parser;
 use cli::{Cli, Commands, ExportFormatArg, OutputFormat};
-use commands::{handle_pull, handle_run, PullOptions};
+use commands::{handle_pull, PullOptions};
 use error::WaylogError;
 use exporter::{ExportFormat, ExportOptions};
 use output::Output;
@@ -53,7 +52,6 @@ async fn main() {
 
         // 1. Resolve project root directory
         let (project_root, is_new_project) = init::resolve_project_root(&cli.command, &mut output)?;
-        let current_dir = std::env::current_dir()?;
 
         // 2. Setup logging (only creates log file if verbose)
         init::setup_logging(&project_root, cli.verbose, cli.quiet)?;
@@ -68,9 +66,6 @@ async fn main() {
 
         // 4. Dispatch command
         match cli.command {
-            Commands::Run { agent, args } => {
-                handle_run(agent, args, project_root, current_dir, &mut output).await?;
-            }
             Commands::Pull {
                 provider,
                 force,
@@ -113,8 +108,6 @@ async fn main() {
         Ok(()) => std::process::exit(exitcode::OK),
         Err(e) => {
             // Display error message to user if not already shown
-            // Some errors (like MissingAgent, ProviderNotFound, AgentNotInstalled) are
-            // already displayed via output.error() in command handlers
             if !e.is_already_displayed() {
                 let error_msg = format!("{}", e);
                 let _ = output.error(&error_msg);

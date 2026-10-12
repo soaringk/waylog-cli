@@ -77,7 +77,20 @@ pub async fn handle_pull(
             synchronizer::Synchronizer::new(provider.clone(), history_dir.clone(), tracker, export);
 
         let session_paths = if let Some(source) = &source {
-            collect_source_paths(source)?
+            let paths = collect_source_paths(source)?;
+            if source.is_dir() {
+                let paths = provider.select_source_paths(paths).await?;
+                if paths.is_empty() {
+                    return Err(WaylogError::PathError(format!(
+                        "No {} history artifacts found in {}",
+                        provider.name(),
+                        source.display()
+                    )));
+                }
+                paths
+            } else {
+                paths
+            }
         } else if let Some(session_id) = &session_id {
             let session_path = provider
                 .find_session(&project_path, session_id)
@@ -92,8 +105,20 @@ pub async fn handle_pull(
         };
 
         let results = synchronizer
-            .sync_paths(session_paths, force || source.is_some())
+            .sync_selected_paths(
+                session_paths,
+                force || source.is_some(),
+                session_id.as_deref(),
+            )
             .await;
+        if results.is_empty() {
+            if let Some(session_id) = &session_id {
+                return Err(WaylogError::SessionNotFound {
+                    provider: provider.name().to_string(),
+                    session_id: session_id.clone(),
+                });
+            }
+        }
         total_tasks += results.len();
 
         output.provider_header(provider.name(), results.len())?;
@@ -247,7 +272,7 @@ async fn collect_session_paths(
 mod tests {
     use super::*;
     use crate::providers::base::{
-        AssistantOutput, ChatMessage, ChatSession, MessageMetadata, MessageRole, Provider,
+        ChatMessage, ChatSession, MessageMetadata, MessageRole, Provider,
     };
     use async_trait::async_trait;
     use chrono::Utc;
@@ -271,10 +296,6 @@ mod tests {
 
         fn is_project_scoped(&self) -> bool {
             self.project_scoped
-        }
-
-        async fn find_latest_session(&self, _project_path: &Path) -> Result<Option<PathBuf>> {
-            Ok(None)
         }
 
         async fn parse_session(&self, file_path: &Path) -> Result<ChatSession> {

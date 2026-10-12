@@ -51,14 +51,6 @@ pub fn resolve_project_root(command: &Commands, output: &mut Output) -> Result<(
                 std::process::exit(0);
             }
         }
-        Commands::Run { .. } => match crate::utils::path::find_project_root() {
-            Some(root) => Ok((root, false)),
-            None => {
-                // For 'run', if no project found, initialize in current dir
-                let current = std::env::current_dir()?;
-                Ok((current, true))
-            }
-        },
     }
 }
 

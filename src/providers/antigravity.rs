@@ -1,4 +1,5 @@
-use crate::error::Result;
+use super::jsonl::JsonlReader;
+use crate::error::{Result, WaylogError};
 use crate::providers::base::*;
 use crate::utils::path;
 use async_trait::async_trait;
@@ -12,17 +13,29 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 pub struct AntigravityProvider {
     data_dir: Option<PathBuf>,
+    name: &'static str,
+    directory: &'static str,
 }
 
 impl AntigravityProvider {
     pub fn new() -> Self {
-        Self { data_dir: None }
+        Self::for_surface("antigravity", "antigravity-cli")
+    }
+
+    pub fn for_surface(name: &'static str, directory: &'static str) -> Self {
+        Self {
+            data_dir: None,
+            name,
+            directory,
+        }
     }
 
     #[cfg(test)]
     fn with_data_dir(data_dir: PathBuf) -> Self {
         Self {
             data_dir: Some(data_dir),
+            name: "antigravity",
+            directory: "antigravity-cli",
         }
     }
 
@@ -30,14 +43,18 @@ impl AntigravityProvider {
         Ok(self
             .data_dir
             .clone()
-            .unwrap_or(path::home_dir()?.join(".gemini").join("antigravity-cli")))
+            .unwrap_or(path::home_dir()?.join(".gemini").join(self.directory)))
     }
 }
 
 #[async_trait]
 impl Provider for AntigravityProvider {
     fn name(&self) -> &str {
-        "antigravity"
+        self.name
+    }
+
+    fn is_project_scoped(&self) -> bool {
+        false
     }
 
     async fn get_all_sessions(&self, project_path: &Path) -> Result<Vec<PathBuf>> {
@@ -46,7 +63,17 @@ impl Provider for AntigravityProvider {
             return Ok(Vec::new());
         }
 
-        let conversation_ids = self.conversation_ids_for_project(project_path).await?;
+        let _ = project_path;
+        let mut conversation_ids = HashSet::new();
+        let brain = data_dir.join("brain");
+        if brain.is_dir() {
+            let mut entries = fs::read_dir(brain).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                if entry.file_type().await?.is_dir() {
+                    conversation_ids.insert(entry.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
         let mut candidates = Vec::new();
 
         for conversation_id in conversation_ids {
@@ -69,30 +96,23 @@ impl Provider for AntigravityProvider {
     }
 
     async fn parse_session(&self, file_path: &Path) -> Result<ChatSession> {
-        let file = fs::File::open(file_path).await?;
-        let reader = BufReader::new(file);
-        let mut lines = reader.lines();
-
-        let session_id = conversation_id_from_transcript_path(file_path).unwrap_or_else(|| {
-            file_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string()
-        });
-        let project_path = self
-            .project_path_for_conversation(&session_id)
-            .await?
+        let (session_id, data_dir) = transcript_location(file_path).ok_or_else(|| {
+            WaylogError::PathError(format!(
+                "Antigravity transcript must retain brain/<session-id>/.system_generated/logs/transcript[_full].jsonl: {}",
+                file_path.display()
+            ))
+        })?;
+        let project_path = Self::project_path_for_conversation(data_dir, session_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, session_id, "Could not read optional project metadata");
+                None
+            })
             .unwrap_or_default();
+        let mut records = JsonlReader::open(file_path).await?;
 
         let mut messages = Vec::new();
-        while let Some(line) = lines.next_line().await? {
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            let event: AntigravityEvent = serde_json::from_str(&line)?;
-
+        while let Some(event) = records.next::<AntigravityEvent>().await? {
             for message in event.into_chat_messages() {
                 messages.push(message);
             }
@@ -100,7 +120,7 @@ impl Provider for AntigravityProvider {
 
         let (started_at, updated_at) = message_time_range(&messages);
         Ok(ChatSession {
-            session_id,
+            session_id: session_id.to_string(),
             provider: self.name().to_string(),
             project_path,
             started_at,
@@ -109,20 +129,31 @@ impl Provider for AntigravityProvider {
         })
     }
 
-    fn has_history(&self) -> bool {
-        self.data_dir().map(|d| d.exists()).unwrap_or(false)
+    async fn select_source_paths(&self, paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+        Ok(paths
+            .iter()
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name == "transcript_full.jsonl")
+                    || (path
+                        .file_name()
+                        .is_some_and(|name| name == "transcript.jsonl")
+                        && !paths.contains(&path.with_file_name("transcript_full.jsonl")))
+            })
+            .cloned()
+            .collect())
     }
 
-    fn run_command(&self) -> Option<&str> {
-        Some("antigravity-cli")
+    fn has_history(&self) -> bool {
+        self.data_dir().map(|d| d.exists()).unwrap_or(false)
     }
 }
 
 impl AntigravityProvider {
-    async fn conversation_ids_for_project(&self, project_path: &Path) -> Result<HashSet<String>> {
-        let mut ids = HashSet::new();
-        let data_dir = self.data_dir()?;
-
+    async fn project_path_for_conversation(
+        data_dir: &Path,
+        conversation_id: &str,
+    ) -> Result<Option<PathBuf>> {
         let history_path = data_dir.join("history.jsonl");
         if history_path.exists() {
             let file = fs::File::open(&history_path).await?;
@@ -138,57 +169,18 @@ impl AntigravityProvider {
                     continue;
                 };
 
-                if paths_equal(Path::new(&entry.workspace), project_path) {
-                    if let Some(id) = entry.conversation_id {
-                        if !id.is_empty() {
-                            ids.insert(id);
-                        }
-                    }
+                if entry.conversation_id.as_deref() == Some(conversation_id) {
+                    return Ok(Some(PathBuf::from(entry.workspace)));
                 }
             }
         }
-
-        let last_conversations_path = data_dir.join("cache").join("last_conversations.json");
-        if last_conversations_path.exists() {
-            let content = fs::read_to_string(&last_conversations_path).await?;
-            let last_conversations: HashMap<String, String> =
-                serde_json::from_str(&content).unwrap_or_default();
-
-            for (workspace, id) in last_conversations {
-                if paths_equal(Path::new(&workspace), project_path) && !id.is_empty() {
-                    ids.insert(id);
-                }
-            }
-        }
-
-        Ok(ids)
-    }
-
-    async fn project_path_for_conversation(
-        &self,
-        conversation_id: &str,
-    ) -> Result<Option<PathBuf>> {
-        let data_dir = self.data_dir()?;
-        let history_path = data_dir.join("history.jsonl");
-        if !history_path.exists() {
-            return Ok(None);
-        }
-
-        let file = fs::File::open(&history_path).await?;
-        let reader = BufReader::new(file);
-        let mut lines = reader.lines();
-
-        while let Some(line) = lines.next_line().await? {
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            let Ok(entry) = serde_json::from_str::<HistoryEntry>(&line) else {
-                continue;
-            };
-
-            if entry.conversation_id.as_deref() == Some(conversation_id) {
-                return Ok(Some(PathBuf::from(entry.workspace)));
+        let cache_path = data_dir.join("cache/last_conversations.json");
+        if cache_path.is_file() {
+            let mapping: HashMap<String, String> =
+                serde_json::from_slice(&fs::read(cache_path).await?)?;
+            if let Some((workspace, _)) = mapping.into_iter().find(|(_, id)| id == conversation_id)
+            {
+                return Ok(Some(PathBuf::from(workspace)));
             }
         }
 
@@ -214,24 +206,41 @@ impl AntigravityProvider {
     }
 }
 
-fn paths_equal(left: &Path, right: &Path) -> bool {
-    let normalize = |path: &Path| {
-        path.to_string_lossy()
-            .trim_end_matches('/')
-            .trim_end_matches('\\')
-            .to_string()
-    };
-
-    normalize(left) == normalize(right)
+fn transcript_location(path: &Path) -> Option<(&str, &Path)> {
+    if !matches!(
+        path.file_name()?.to_str()?,
+        "transcript.jsonl" | "transcript_full.jsonl"
+    ) {
+        return None;
+    }
+    let logs = path.parent()?;
+    let generated = logs.parent()?;
+    let conversation = generated.parent()?;
+    let brain = conversation.parent()?;
+    if logs.file_name()? != "logs"
+        || generated.file_name()? != ".system_generated"
+        || brain.file_name()? != "brain"
+    {
+        return None;
+    }
+    Some((conversation.file_name()?.to_str()?, brain.parent()?))
 }
 
-fn conversation_id_from_transcript_path(path: &Path) -> Option<String> {
-    path.parent()?
-        .parent()?
-        .parent()?
-        .file_name()?
-        .to_str()
-        .map(ToOwned::to_owned)
+fn user_request_text(content: String) -> String {
+    let mut remaining = content.as_str();
+    let mut requests = Vec::new();
+    while let Some((_, rest)) = remaining.split_once("<USER_REQUEST>") {
+        let Some((request, tail)) = rest.split_once("</USER_REQUEST>") else {
+            break;
+        };
+        requests.push(request);
+        remaining = tail;
+    }
+    if requests.is_empty() {
+        content
+    } else {
+        requests.join("\n\n")
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -246,7 +255,6 @@ struct AntigravityEvent {
     #[serde(rename = "type")]
     event_type: String,
     source: String,
-    status: Option<String>,
     created_at: Option<String>,
     content: Option<String>,
     thinking: Option<String>,
@@ -255,14 +263,6 @@ struct AntigravityEvent {
 
 impl AntigravityEvent {
     fn into_chat_messages(self) -> Vec<ChatMessage> {
-        if self
-            .status
-            .as_deref()
-            .is_some_and(|status| status != "DONE")
-        {
-            return Vec::new();
-        }
-
         let role = match (self.event_type.as_str(), self.source.as_str()) {
             ("USER_INPUT", "USER_EXPLICIT") => MessageRole::User,
             ("PLANNER_RESPONSE", "MODEL") => MessageRole::Assistant(AssistantOutput::Message),
@@ -270,6 +270,11 @@ impl AntigravityEvent {
         };
 
         let content = self.content.unwrap_or_default();
+        let content = if role == MessageRole::User {
+            user_request_text(content)
+        } else {
+            content
+        };
         let timestamp = self
             .created_at
             .as_deref()
@@ -290,10 +295,15 @@ impl AntigravityEvent {
                 content,
                 metadata: MessageMetadata {
                     tool_calls: tool_names,
-                    thoughts: self.thinking.into_iter().collect(),
+                    thoughts: self.thinking.clone().into_iter().collect(),
                     ..Default::default()
                 },
             });
+        }
+        if messages.is_empty() {
+            if let Some(thinking) = self.thinking.filter(|text| !text.is_empty()) {
+                messages.push(ChatMessage::reasoning(timestamp, thinking));
+            }
         }
         messages.extend(
             tool_calls
@@ -309,6 +319,45 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    #[tokio::test]
+    async fn all_surfaces_discover_unmapped_brain_histories_and_choose_full_transcript() {
+        for (name, surface) in [
+            ("antigravity", "antigravity-cli"),
+            ("antigravity-2", "antigravity"),
+            ("antigravity-ide", "antigravity-ide"),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let logs = dir.path().join("brain/session/.system_generated/logs");
+            fs::create_dir_all(&logs).await.unwrap();
+            fs::write(logs.join("transcript.jsonl"), "").await.unwrap();
+            let full = logs.join("transcript_full.jsonl");
+            fs::write(&full, "{\"type\":\"USER_INPUT\",\"source\":\"USER_EXPLICIT\",\"content\":\"request  \"}\n").await.unwrap();
+            let provider = AntigravityProvider {
+                data_dir: Some(dir.path().to_path_buf()),
+                name,
+                directory: surface,
+            };
+            assert!(!provider.is_project_scoped());
+            assert_eq!(
+                provider
+                    .get_all_sessions(Path::new("/unmapped-project"))
+                    .await
+                    .unwrap(),
+                vec![full.clone()]
+            );
+            let session = provider.parse_session(&full).await.unwrap();
+            assert_eq!(session.messages[0].content, "request  ");
+            assert!(session.project_path.as_os_str().is_empty());
+            assert_eq!(
+                provider
+                    .select_source_paths(vec![logs.join("transcript.jsonl"), full.clone()])
+                    .await
+                    .unwrap(),
+                vec![full]
+            );
+        }
+    }
+
     #[test]
     fn conversation_id_is_read_from_brain_path() {
         let path = Path::new(
@@ -316,9 +365,107 @@ mod tests {
         );
 
         assert_eq!(
-            conversation_id_from_transcript_path(path),
-            Some("session-1".to_string())
+            transcript_location(path),
+            Some(("session-1", Path::new("/home/cody/.gemini/antigravity-cli")))
         );
+    }
+
+    #[tokio::test]
+    async fn relocated_native_trees_preserve_identity_and_use_only_adjacent_metadata() {
+        let temp = TempDir::new().unwrap();
+        let local = temp.path().join("local");
+        fs::create_dir_all(&local).await.unwrap();
+        fs::write(
+            local.join("history.jsonl"),
+            r#"{"workspace":"/wrong-local-project","conversationId":"one"}"#,
+        )
+        .await
+        .unwrap();
+        let provider = AntigravityProvider::with_data_dir(local);
+        for root in ["original", "relocated"] {
+            let surface = temp.path().join(root);
+            fs::create_dir_all(surface.join("cache")).await.unwrap();
+            fs::write(
+                surface.join("history.jsonl"),
+                r#"{"workspace":"/recorded-project","conversationId":"one"}"#,
+            )
+            .await
+            .unwrap();
+            fs::write(
+                surface.join("cache/last_conversations.json"),
+                r#"{"/cached-project":"two"}"#,
+            )
+            .await
+            .unwrap();
+            for (id, project) in [
+                ("one", "/recorded-project"),
+                ("two", "/cached-project"),
+                ("unmapped", ""),
+            ] {
+                let logs = surface
+                    .join("brain")
+                    .join(id)
+                    .join(".system_generated/logs");
+                fs::create_dir_all(&logs).await.unwrap();
+                let transcript = logs.join("transcript_full.jsonl");
+                fs::write(
+                    &transcript,
+                    r#"{"type":"USER_INPUT","source":"USER_EXPLICIT","content":"request"}"#,
+                )
+                .await
+                .unwrap();
+                let session = provider.parse_session(&transcript).await.unwrap();
+                assert_eq!(session.session_id, id);
+                assert_eq!(session.project_path, Path::new(project));
+            }
+            fs::remove_file(surface.join("history.jsonl"))
+                .await
+                .unwrap();
+            fs::remove_file(surface.join("cache/last_conversations.json"))
+                .await
+                .unwrap();
+            let session = provider
+                .parse_session(
+                    &surface.join("brain/one/.system_generated/logs/transcript_full.jsonl"),
+                )
+                .await
+                .unwrap();
+            assert!(session.project_path.as_os_str().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn detached_transcripts_without_native_identity_are_rejected() {
+        let temp = TempDir::new().unwrap();
+        let provider = AntigravityProvider::with_data_dir(temp.path().join("unused"));
+        for relative in [
+            "upload/one/transcript_full.jsonl",
+            "upload/two/transcript_full.jsonl",
+            "other/session/.system_generated/logs/transcript_full.jsonl",
+            "brain/session/.system_generated/logs/renamed.jsonl",
+        ] {
+            let transcript = temp.path().join(relative);
+            fs::create_dir_all(transcript.parent().unwrap())
+                .await
+                .unwrap();
+            fs::write(
+                &transcript,
+                r#"{"type":"USER_INPUT","source":"USER_EXPLICIT","content":"request"}"#,
+            )
+            .await
+            .unwrap();
+            let error = provider.parse_session(&transcript).await.unwrap_err();
+            assert!(error.to_string().contains("must retain brain/<session-id>"));
+        }
+    }
+
+    #[test]
+    fn extracts_native_user_requests_without_trimming_or_requiring_done_status() {
+        let messages = serde_json::from_str::<AntigravityEvent>(
+            r#"{"type":"USER_INPUT","source":"USER_EXPLICIT","status":"RUNNING","content":"context<USER_REQUEST> first  </USER_REQUEST>context<USER_REQUEST>second\n</USER_REQUEST>context"}"#,
+        ).unwrap().into_chat_messages();
+        assert_eq!(messages[0].content, " first  \n\nsecond\n");
+        assert_eq!(user_request_text("plain  ".to_string()), "plain  ");
     }
 
     #[test]

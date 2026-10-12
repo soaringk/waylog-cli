@@ -6,7 +6,7 @@ impl Output {
     pub fn found_tracking(&mut self, path: &std::path::Path) -> io::Result<()> {
         if !self.quiet() {
             if self.json() {
-                self.print_json_internal("found_tracking", &path.display().to_string())?;
+                self.print_json("found_tracking", &path.display().to_string())?;
             } else {
                 writeln!(
                     self.stdout(),

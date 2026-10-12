@@ -56,12 +56,16 @@ pub async fn write_session(
     session: &ChatSession,
     options: ExportOptions,
 ) -> Result<()> {
-    let content = match options.format {
-        ExportFormat::Markdown => markdown::generate(session, options.include_tool_calls),
-        ExportFormat::Json => json::generate(session, options.include_tool_calls)?,
-    };
+    let content = generate_session(session, options)?;
     fs::write(path, content).await?;
     Ok(())
+}
+
+pub(crate) fn generate_session(session: &ChatSession, options: ExportOptions) -> Result<String> {
+    match options.format {
+        ExportFormat::Markdown => Ok(markdown::generate(session, options.include_tool_calls)),
+        ExportFormat::Json => json::generate(session, options.include_tool_calls),
+    }
 }
 
 /// The project a session belongs to, absent when the provider recorded none.

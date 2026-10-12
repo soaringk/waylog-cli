@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(name = "waylog")]
-#[command(about = "Automatically sync AI chat history from various CLI tools", long_about = None)]
+#[command(about = "Export AI conversation histories to local Markdown or JSON", long_about = None)]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]
@@ -39,19 +39,9 @@ pub enum ExportFormatArg {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Run an AI CLI tool and automatically sync its chat history
-    Run {
-        /// The AI tool to run (antigravity, codex, claude, gemini, opencode)
-        agent: Option<String>,
-
-        /// Additional arguments to pass to the agent
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
     /// Pull chat history from providers
     Pull {
-        /// Specific provider to pull (if not specified, pulls all)
+        /// Provider: antigravity, antigravity-2, antigravity-ide, claude, codex, cursor, dsh, gemini, grok, opencode, qoder, qoderwork (default: all local histories)
         #[arg(short, long)]
         provider: Option<String>,
 
@@ -67,13 +57,8 @@ pub enum Commands {
         #[arg(long, visible_alias = "hiden", requires = "recursive")]
         hidden: bool,
 
-        /// Pull only this provider session ID
-        #[arg(
-            long,
-            requires = "provider",
-            conflicts_with = "recursive",
-            group = "target"
-        )]
+        /// Pull only this provider session ID (also filters --source imports)
+        #[arg(long, requires = "provider", conflicts_with = "recursive")]
         session: Option<String>,
 
         /// Parse a supported provider session file or directory tree
@@ -81,8 +66,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             requires = "provider",
-            conflicts_with = "recursive",
-            group = "target"
+            conflicts_with = "recursive"
         )]
         source: Option<std::path::PathBuf>,
 
@@ -129,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn source_conflicts_with_session_lookup() {
+    fn source_can_select_one_conversation_by_id() {
         assert!(Cli::try_parse_from([
             "waylog",
             "pull",
@@ -140,7 +124,7 @@ mod tests {
             "--source",
             "/tmp/raw",
         ])
-        .is_err());
+        .is_ok());
     }
 
     #[test]

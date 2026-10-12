@@ -9,24 +9,9 @@ pub fn home_dir() -> Result<PathBuf> {
         .ok_or_else(|| WaylogError::PathError("Could not find home directory".to_string()))
 }
 
-/// Get the data directory for AI tools
-/// On Unix: ~/.{tool}
-/// On Windows: %USERPROFILE%\.{tool} (future extension point)
+/// Provider data directories live under the user's home directory.
 pub fn get_ai_data_dir(tool_name: &str) -> Result<PathBuf> {
-    let home = home_dir()?;
-
-    #[cfg(target_os = "windows")]
-    {
-        // Windows: Use AppData\Local for application data (future extension)
-        // For now, keep it simple and use home directory
-        Ok(home.join(format!(".{}", tool_name)))
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        // Unix-like systems (macOS, Linux)
-        Ok(home.join(format!(".{}", tool_name)))
-    }
+    Ok(home_dir()?.join(format!(".{tool_name}")))
 }
 
 /// Encode a path for Claude Code (replace all non-alphanumeric chars with -)
@@ -65,31 +50,6 @@ pub fn get_waylog_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(WAYLOG_DIR).join(subdirs::HISTORY)
 }
 
-/// Find the project root by looking for .waylog folder or .git folder
-/// moving upwards from the current directory.
-/// If we reach the home directory or the system root without finding a marker,
-/// returns the current directory to avoid treat the whole home as a project.
-pub fn find_project_root() -> Option<PathBuf> {
-    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let home = home_dir().ok();
-
-    find_project_root_from(&current_dir, home.as_deref())
-}
-
-fn find_project_root_from(current_dir: &Path, home: Option<&Path>) -> Option<PathBuf> {
-    for path in current_dir.ancestors() {
-        if path.join(WAYLOG_DIR).is_dir() {
-            return Some(path.to_path_buf());
-        }
-
-        if home == Some(path) {
-            break;
-        }
-    }
-
-    None
-}
-
 /// Ensure a directory exists, creating it if necessary
 pub fn ensure_dir_exists(path: &Path) -> Result<()> {
     if !path.exists() {
@@ -101,7 +61,6 @@ pub fn ensure_dir_exists(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use tempfile::TempDir;
 
     #[test]
@@ -171,17 +130,5 @@ mod tests {
         ensure_dir_exists(&nested_dir).unwrap();
         assert!(nested_dir.exists());
         assert!(nested_dir.is_dir());
-    }
-
-    #[test]
-    fn test_find_project_root_from_path() {
-        let temp_dir = TempDir::new().unwrap();
-        let project_root = temp_dir.path().join("project");
-        let subdir = project_root.join("subdir").join("deep");
-        fs::create_dir_all(&subdir).unwrap();
-        fs::create_dir_all(project_root.join(".waylog")).unwrap();
-
-        assert_eq!(find_project_root_from(&subdir, None), Some(project_root));
-        assert_eq!(find_project_root_from(temp_dir.path(), None), None);
     }
 }

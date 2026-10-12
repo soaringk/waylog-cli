@@ -2,6 +2,42 @@
 
 User-facing features and critical fixes are documented here from version 0.3.0 onward.
 
+## [0.5.0] - 2026-10-12
+
+### Removed
+
+- Removed `waylog run`, agent launching, process/signal management and background synchronization. Periodic exports use repeated `waylog pull` invocations from an external scheduler.
+- Removed run-only provider interfaces, dependencies, demos and tests.
+
+### Added
+
+- Cursor read-only SQLite import with multiple conversations, native ordering, reasoning and tool exchanges.
+- DeepSeek Harness current-generation JSONL and Zstandard import, including compaction; Grok Build streamed histories and rewinds.
+- Antigravity 2.0 and IDE histories alongside CLI. All three surfaces discover their complete application-wide brain histories, even without workspace mappings.
+- OpenCode can import all conversations from a supplied SQLite database without accessing local history.
+- `--session` selects a conversation within a supplied database or history artifact.
+- Provider-specific source-directory selection avoids importing auxiliary files or obsolete native generations.
+- Codex discovery includes archived sessions as well as active history, with the same project scope and targeted session lookup.
+- Codex assistant records carry the model recorded in each turn context. Event-only histories are supported without duplicating their mirrors in modern response-item histories.
+- Gemini exports native tool calls and patched results with `--include-tool-calls`, and retains display text and recorded thoughts.
+
+### Fixed
+
+- Optional Antigravity project metadata errors do not block transcript exports.
+- Cursor and OpenCode isolate malformed conversations during database imports. Targeted imports select the native ID before parsing unrelated conversations.
+- Gemini tool-only messages preserve token usage once per native message; Grok text separated only by omitted media stays in one submission.
+- Claude-family source directories exclude subagent recordings, and explicit sidechain imports are rejected, preventing child sessions from overwriting their parent. Native session IDs remain authoritative when metadata follows an initial snapshot record.
+- Antigravity imports validate native identity-bearing paths and resolve project metadata from the supplied tree.
+- JSONL providers tolerate only an unfinished, unterminated final JSON record. Malformed records and newline-terminated incomplete records still fail, rather than silently dropping evidence.
+- Gemini JSONL replay applies message replacements, checkpoints, content/tool patches, removals, ordering and rewinds before export. Timestamps do not reorder messages.
+- Gemini discovery selects one recording during JSON-to-JSONL migration, retaining a complete snapshot until the append log catches up while honoring explicit edits and rewinds.
+- Missing or invalid Gemini timestamps remain absent, and an opaque project hash is never presented as a working directory. `.project_root` supplies the path when available. Subagent recordings are not attributed to the main conversation.
+- Normal pulls refresh changed content or metadata even when record counts stay equal. A previously exported conversation rewound to empty is rewritten as an empty export instead of leaving stale answers behind.
+
+### Upgrading
+
+Run a normal pull in each project you want to refresh, using `--format json` for structured exports. Equal-count exports are now checked against the current rendered content, so these changes do not require a one-time `--force`.
+
 ## [0.4.2] - 2026-08-17
 
 ### Changed
@@ -66,3 +102,5 @@ This release changes the export layout. Sessions whose message count changes are
 [0.3.2]: https://github.com/soaringk/waylog-cli/releases/tag/v0.3.2
 [0.3.1]: https://github.com/soaringk/waylog-cli/releases/tag/v0.3.1
 [0.3.0]: https://github.com/soaringk/waylog-cli/releases/tag/v0.3.0
+
+[0.5.0]: https://github.com/soaringk/waylog-cli/releases/tag/v0.5.0

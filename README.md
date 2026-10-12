@@ -5,7 +5,7 @@
 
 **Seamlessly sync, preserve, and version-control your AI coding conversations locally.**
 
-WayLog CLI is a lightweight tool written in Rust that automatically saves supported AI coding sessions into clean, searchable local Markdown files. Stop losing your context to session timeouts—WayLog CLI helps you own your AI history locally.
+WayLog CLI is a lightweight tool written in Rust that exports supported AI coding histories into clean, searchable local Markdown files. Stop losing your context to session timeouts—WayLog CLI helps you own your AI history locally.
 
 [中文文档](README_zh.md) | [English](README.md)
 
@@ -13,7 +13,6 @@ WayLog CLI is a lightweight tool written in Rust that automatically saves suppor
 
 ## ✨ Features
 
-- **🔄 Auto-Sync**: `run` periodically synchronizes the latest session and performs a final sync when the agent exits.
 - **📦 Project Recovery**: `pull` restores provider sessions associated with the current project.
 - **🗂️ Workspace Recovery**: `pull --recursive` includes visible descendant projects and aggregates their sessions into the current project's WayLog history.
 - **📝 Markdown Native**: All history is saved as high-quality Markdown files with frontmatter metadata.
@@ -36,18 +35,7 @@ The installers select the matching GitHub Release binary for macOS, Linux, or Wi
 
 ## 💡 Usage
 
-### 1. Run an Agent with Sync (`run`)
-
-Use `waylog run` instead of calling your AI tool directly. WayLog launches the agent and keeps its conversation history synchronized.
-
-```bash
-# Replace claude with another CLI-backed provider; Qoder and QoderWork are pull-only
-waylog run claude
-```
-
-![WayLog Run Demo](demo/run.gif)
-
-### 2. Full Sync / Recover History (`pull`)
+### Full Sync / Recover History (`pull`)
 
 `pull` reads the current project and writes to its `.waylog/history/`; ancestors never affect it. `--recursive` also scans visible descendant projects and aggregates them into the same output. Use `--hidden` to include hidden descendants or `--output-dir` to replace the destination.
 
@@ -111,7 +99,7 @@ A `tool` part is one exchange: the call in `content` and what it returned in `re
 
 Do not recover structure by matching Markdown headings: message text can contain lines that look exactly like them, so extraction from Markdown is approximate by nature. `--format json` exists for that reason. Absent values stay `null`, and `result`, `model`, `tokens`, `tool_call_id`, `tool_calls`, and `thoughts` appear only when the provider recorded them.
 
-Both formats hold the same content and use the same filename with a different extension, so one directory can hold both. `waylog run` always writes Markdown.
+Both formats hold the same content and use the same filename with a different extension, so one directory can hold both.
 
 ### Conversation layout
 
@@ -131,15 +119,38 @@ Providers encrypt or omit most verbatim chains of thought. WayLog exports only t
 
 | Provider | Status | Description |
 |----------|--------|-------------|
-| **Antigravity** | 🚧 Beta | Supports the Antigravity CLI. |
+| **Antigravity** | 🚧 Beta | CLI (`antigravity`), 2.0 (`antigravity-2`) and IDE (`antigravity-ide`); reads all conversations in each surface’s brain directory. |
 | **Claude Code** | 🚧 Beta | Supports `claude` CLI tool from Anthropic. |
 | **Gemini CLI** | 🚧 Beta | Supports Google's Gemini CLI tools. |
 | **Codex** | 🚧 Beta | Supports OpenAI Codex CLI. |
-| **OpenCode** | 🚧 Beta | Reads local SQLite sessions and official JSON session exports. |
-| **Qoder** | 🚧 Beta | Pull-only; reads project-scoped Qoder IDE sessions from `~/.qoder/projects/`. |
-| **QoderWork** | 🚧 Beta | Pull-only; reads application-wide QoderWork tasks from `~/.qoderwork/projects/`. |
+| **OpenCode** | 🚧 Beta | Reads local SQLite sessions, supplied SQLite databases and official JSON session exports. |
+| **Cursor** | 🚧 Beta | Opens application-wide `state.vscdb` read-only and expands conversations with native ordering, reasoning and tools. |
+| **DeepSeek Harness** | 🚧 Beta | `dsh`; reads the newest project-scoped JSONL generation under `~/.dsh/sessions/`, including Zstandard compression and native compaction. |
+| **Grok Build** | 🚧 Beta | `grok`; reads project-scoped `updates.jsonl` and `summary.json` under `~/.grok/sessions/`, replaying streamed chunks and rewinds. |
+| **Qoder** | 🚧 Beta | Reads project-scoped Qoder IDE sessions from `~/.qoder/projects/`. |
+| **QoderWork** | 🚧 Beta | Reads application-wide QoderWork tasks from `~/.qoderwork/projects/`. |
+
+Codex scans both `~/.codex/sessions/` and `~/.codex/archived_sessions/`, keeping discovery limited to the requested project. Structured exports attribute assistant parts to the model recorded in their turn context. Event-only rollouts are also supported; when response items are available, their stream is used without adding duplicate event messages.
+
+Gemini reads JSON snapshots and replays JSONL replacements, checkpoints, patches and rewinds in provider order. When a legacy JSON snapshot and its matching JSONL successor coexist, discovery keeps the more complete snapshot until migration catches up; recorded edits and rewinds make the log authoritative even with fewer messages. Explicit `--source` files are always parsed as supplied. It uses nonempty `displayContent` when recorded, retains readable thoughts, and includes tool calls/results with `--include-tool-calls`. A missing or invalid time stays absent. The project path comes from `.project_root` when available; a hash is not a working directory. Subagent recordings are skipped.
+
+JSONL parsers ignore an unfinished final JSON record only when it has no terminating newline. Other corruption fails that session and leaves its previous export untouched. Normal pulls compare equal-count exports with freshly rendered content, so message edits and metadata changes also refresh them. If an already exported conversation becomes empty after a rewind, its export is rewritten with no turns; unrelated files are untouched.
+
+Claude-family source directories exclude subagent recordings. Explicit subagent/sidechain imports are rejected because they can reuse the parent session identity.
 
 Qoder follows the current project. QoderWork tasks usually have no working directory, so `waylog pull --provider qoderwork` collects all QoderWork sessions into the current WayLog history.
+
+Antigravity’s surface roots are `~/.gemini/antigravity-cli/`, `~/.gemini/antigravity/` and `~/.gemini/antigravity-ide/`. Discovery is application-wide; an unrecorded project path stays absent. CLI `history.jsonl` or its last-conversation cache can supply the project path, but missing or unreadable project metadata does not prevent transcript export.
+
+For collected Antigravity histories, retain `brain/<session-id>/.system_generated/logs/transcript[_full].jsonl` beneath the copied surface root. Keep its `history.jsonl` or cache alongside `brain/` when project metadata is needed. Detached transcripts with an ambiguous identity are rejected. Metadata is read from the supplied tree.
+
+An explicit `--source` file is parsed as supplied. For a directory, the provider selects native history artifacts, excluding auxiliary files and obsolete generations. A database can produce several independent sessions; combine `--session` with `--source` to select one by ID. A missing ID fails. Database imports report malformed conversations separately while exporting the valid ones.
+
+```bash
+waylog pull --provider cursor --format json
+waylog pull --provider dsh --source /path/to/dsh/sessions --include-tool-calls
+waylog pull --provider cursor --source /path/to/state.vscdb --session CONVERSATION_ID
+```
 
 ### Development build
 

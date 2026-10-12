@@ -1,3 +1,4 @@
+use super::jsonl::JsonlReader;
 use crate::error::Result;
 use crate::providers::base::*;
 use crate::utils::path;
@@ -10,27 +11,35 @@ use tokio::fs;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 pub struct CodexProvider {
-    data_dir: Option<PathBuf>,
+    data_dirs: Option<Vec<PathBuf>>,
 }
 
 impl CodexProvider {
     pub fn new() -> Self {
-        Self { data_dir: None }
+        Self { data_dirs: None }
     }
 
     #[cfg(test)]
     fn with_data_dir(data_dir: PathBuf) -> Self {
         Self {
-            data_dir: Some(data_dir),
+            data_dirs: Some(vec![data_dir]),
         }
     }
 
-    fn data_dir(&self) -> Result<PathBuf> {
-        if let Some(data_dir) = &self.data_dir {
-            return Ok(data_dir.clone());
+    #[cfg(test)]
+    fn with_data_dirs(directories: Vec<PathBuf>) -> Self {
+        Self {
+            data_dirs: Some(directories),
+        }
+    }
+
+    fn data_dirs(&self) -> Result<Vec<PathBuf>> {
+        if let Some(directories) = &self.data_dirs {
+            return Ok(directories.clone());
         }
 
-        Ok(path::home_dir()?.join(".codex").join("sessions"))
+        let root = path::home_dir()?.join(".codex");
+        Ok(vec![root.join("sessions"), root.join("archived_sessions")])
     }
 }
 
@@ -41,25 +50,22 @@ impl Provider for CodexProvider {
     }
 
     async fn find_session(&self, project_path: &Path, session_id: &str) -> Result<Option<PathBuf>> {
-        let base_session_dir = self.data_dir()?;
-        if !base_session_dir.exists() {
-            return Ok(None);
-        }
-
-        for entry in walkdir::WalkDir::new(base_session_dir) {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-            let path = entry.path();
-            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            if path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
-                && (stem == session_id || stem.ends_with(session_id))
-                && self.probe_project_path(path, project_path).await?
+        for base_session_dir in self.data_dirs()? {
+            for entry in walkdir::WalkDir::new(base_session_dir)
+                .into_iter()
+                .filter_map(|entry| entry.ok())
             {
-                return Ok(Some(path.to_path_buf()));
+                let path = entry.path();
+                let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                    continue;
+                };
+                if path.is_file()
+                    && path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
+                    && (stem == session_id || stem.ends_with(session_id))
+                    && self.probe_project_path(path, project_path).await?
+                {
+                    return Ok(Some(path.to_path_buf()));
+                }
             }
         }
 
@@ -67,34 +73,25 @@ impl Provider for CodexProvider {
     }
 
     async fn get_all_sessions(&self, project_path: &Path) -> Result<Vec<PathBuf>> {
-        let base_session_dir = self.data_dir()?;
-
-        if !base_session_dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        // Recursively find all .jsonl files in the base session directory
         let mut candidates = Vec::new();
-        let walker = walkdir::WalkDir::new(&base_session_dir);
-
-        for entry in walker {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-
-            let path = entry.path();
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                // Probe the file for project path match
-                if self
-                    .probe_project_path(path, project_path)
-                    .await
-                    .unwrap_or(false)
+        for directory in self.data_dirs()? {
+            for entry in walkdir::WalkDir::new(directory)
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+            {
+                let path = entry.path();
+                if path.is_file()
+                    && path.extension().and_then(|s| s.to_str()) == Some("jsonl")
+                    && self
+                        .probe_project_path(path, project_path)
+                        .await
+                        .unwrap_or(false)
                 {
-                    if let Ok(metadata) = fs::metadata(path).await {
-                        if let Ok(modified) = metadata.modified() {
-                            candidates.push((path.to_path_buf(), modified));
-                        }
+                    if let Ok(modified) = fs::metadata(path)
+                        .await
+                        .and_then(|metadata| metadata.modified())
+                    {
+                        candidates.push((path.to_path_buf(), modified));
                     }
                 }
             }
@@ -107,11 +104,11 @@ impl Provider for CodexProvider {
     }
 
     async fn parse_session(&self, file_path: &Path) -> Result<ChatSession> {
-        let file = fs::File::open(file_path).await?;
-        let reader = BufReader::new(file);
-        let mut lines = reader.lines();
+        let mut records = JsonlReader::open(file_path).await?;
 
         let mut messages = Vec::new();
+        let mut legacy_messages = Vec::new();
+        let mut completed_messages = Vec::new();
         let mut session_id = file_path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -121,13 +118,9 @@ impl Provider for CodexProvider {
         // A resumed or forked rollout replays the sessions it continues, so only the
         // first `session_meta` identifies this file.
         let mut identified = false;
+        let mut current_model: Option<String> = None;
 
-        while let Some(line) = lines.next_line().await? {
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            let event: CodexEvent = serde_json::from_str(&line)?;
+        while let Some(event) = records.next::<CodexEvent>().await? {
             match event.event_type.as_str() {
                 "session_meta" if !identified => {
                     identified = true;
@@ -145,6 +138,13 @@ impl Provider for CodexProvider {
                     }
                 }
                 "turn_context" => {
+                    current_model = event
+                        .payload
+                        .as_ref()
+                        .and_then(|payload| payload.get("model"))
+                        .and_then(Value::as_str)
+                        .filter(|model| !model.is_empty())
+                        .map(str::to_string);
                     if let Some(cwd) = event
                         .payload
                         .as_ref()
@@ -154,9 +154,89 @@ impl Provider for CodexProvider {
                         session_project_path = PathBuf::from(cwd);
                     }
                 }
+                "event_msg" => {
+                    if let Some(payload) = event.payload {
+                        let kind = payload.get("type").and_then(Value::as_str);
+                        if kind == Some("agent_message")
+                            && (payload.get("author").is_some()
+                                || payload.get("recipient").is_some())
+                        {
+                            continue;
+                        }
+                        let (role, content, completed) = match kind {
+                            Some("user_message") => (
+                                Some(MessageRole::User),
+                                payload
+                                    .get("message")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string),
+                                false,
+                            ),
+                            Some("agent_message") => (
+                                Some(MessageRole::Assistant(AssistantOutput::Message)),
+                                payload
+                                    .get("message")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string),
+                                false,
+                            ),
+                            Some("item_completed") => {
+                                let item = &payload["item"];
+                                let role = match item["type"].as_str() {
+                                    Some("UserMessage") => Some(MessageRole::User),
+                                    Some("AgentMessage") => {
+                                        Some(MessageRole::Assistant(AssistantOutput::Message))
+                                    }
+                                    _ => None,
+                                };
+                                let content =
+                                    item.get("content").and_then(Value::as_array).map(|parts| {
+                                        parts
+                                            .iter()
+                                            .filter_map(|part| {
+                                                part.get("text").and_then(Value::as_str)
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n\n")
+                                    });
+                                (role, content, true)
+                            }
+                            _ => (None, None, false),
+                        };
+                        if let (Some(role), Some(content)) =
+                            (role, content.filter(|text| !text.is_empty()))
+                        {
+                            let record = ChatMessage {
+                                timestamp: event
+                                    .timestamp
+                                    .as_deref()
+                                    .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                                    .map(|value| value.with_timezone(&Utc)),
+                                role,
+                                content,
+                                metadata: MessageMetadata {
+                                    model: matches!(role, MessageRole::Assistant(_))
+                                        .then(|| current_model.clone())
+                                        .flatten(),
+                                    ..Default::default()
+                                },
+                            };
+                            if completed {
+                                completed_messages.push(record);
+                            } else {
+                                legacy_messages.push(record);
+                            }
+                        }
+                    }
+                }
                 "response_item" => {
                     if let Some(payload) = event.payload {
-                        for msg in self.parse_response_item(payload, event.timestamp.as_deref())? {
+                        for mut msg in
+                            self.parse_response_item(payload, event.timestamp.as_deref())?
+                        {
+                            if matches!(msg.role, MessageRole::Assistant(_)) {
+                                msg.metadata.model = current_model.clone();
+                            }
                             messages.push(msg);
                         }
                     }
@@ -165,6 +245,14 @@ impl Provider for CodexProvider {
             }
         }
 
+        // Event messages mirror response items in modern rollouts; never export both.
+        if messages.is_empty() {
+            messages = if legacy_messages.is_empty() {
+                completed_messages
+            } else {
+                legacy_messages
+            };
+        }
         let (started_at, updated_at) = message_time_range(&messages);
         Ok(ChatSession {
             session_id,
@@ -177,11 +265,8 @@ impl Provider for CodexProvider {
     }
 
     fn has_history(&self) -> bool {
-        self.data_dir().is_ok_and(|directory| directory.exists())
-    }
-
-    fn run_command(&self) -> Option<&str> {
-        Some("codex")
+        self.data_dirs()
+            .is_ok_and(|directories| directories.iter().any(|directory| directory.is_dir()))
     }
 }
 
@@ -316,7 +401,130 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finds_latest_session_outside_recent_date_directories() {
+    async fn event_only_histories_export_without_duplicating_modern_mirrors() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("events.jsonl");
+        let lines = [
+            serde_json::json!({"type":"session_meta","payload":{"id":"own"}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"native-model"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":"request  "}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"agent_message","message":"answer"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"agent_message","message":"child traffic","author":"child","recipient":"parent"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"text":"answer"}]}}}),
+        ];
+        let content = lines
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&file, &content).await.unwrap();
+        let session = CodexProvider::new().parse_session(&file).await.unwrap();
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].content, "request  ");
+        assert_eq!(
+            session.messages[1].metadata.model.as_deref(),
+            Some("native-model")
+        );
+        let modern = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"response stream"}]}});
+        fs::write(&file, format!("{content}\n{modern}"))
+            .await
+            .unwrap();
+        let session = CodexProvider::new().parse_session(&file).await.unwrap();
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].content, "response stream");
+        fs::write(&file, serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"text":"only completed items"}]}}}).to_string()).await.unwrap();
+        assert_eq!(
+            CodexProvider::new()
+                .parse_session(&file)
+                .await
+                .unwrap()
+                .messages[0]
+                .content,
+            "only completed items"
+        );
+    }
+
+    #[tokio::test]
+    async fn discovers_archived_sessions_when_active_history_is_missing() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir(&project).await.unwrap();
+        let active = dir.path().join("sessions");
+        let archive = dir.path().join("archived_sessions");
+        fs::create_dir(&archive).await.unwrap();
+        let rollout = archive.join("rollout-archived-id.jsonl");
+        fs::write(&rollout, session_meta_line("archived-id", &project))
+            .await
+            .unwrap();
+        fs::write(
+            archive.join("rollout-other-id.jsonl"),
+            session_meta_line("other-id", &dir.path().join("other-project")),
+        )
+        .await
+        .unwrap();
+        let provider = CodexProvider::with_data_dirs(vec![active, archive]);
+        assert!(provider.has_history());
+        assert_eq!(
+            provider.get_all_sessions(&project).await.unwrap(),
+            vec![rollout.clone()]
+        );
+        assert_eq!(
+            provider
+                .find_session(&project, "archived-id")
+                .await
+                .unwrap(),
+            Some(rollout.clone())
+        );
+        assert_eq!(
+            provider
+                .get_all_sessions(&project)
+                .await
+                .unwrap()
+                .into_iter()
+                .next(),
+            Some(rollout)
+        );
+    }
+
+    #[tokio::test]
+    async fn records_model_changes_without_borrowing_a_future_turn_model() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("models.jsonl");
+        let mut lines = vec![session_meta_line("own-id", dir.path())];
+        for model in [None, Some("model-one"), Some("model-two"), None] {
+            lines.push(
+                serde_json::json!({"type":"turn_context","payload":{"model":model}}).to_string(),
+            );
+            lines.push(serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}).to_string());
+            lines.push(serde_json::json!({"type":"response_item","payload":{"type":"reasoning","summary":[{"text":"summary"}]}}).to_string());
+        }
+        fs::write(&file, lines.join("\n") + "\n{\"type\":")
+            .await
+            .unwrap();
+        let session = CodexProvider::new().parse_session(&file).await.unwrap();
+        let models = session
+            .messages
+            .iter()
+            .map(|message| message.metadata.model.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            models,
+            vec![
+                None,
+                None,
+                Some("model-one"),
+                Some("model-one"),
+                Some("model-two"),
+                Some("model-two"),
+                None,
+                None
+            ]
+        );
+        assert_eq!(session.session_id, "own-id");
+    }
+
+    #[tokio::test]
+    async fn discovers_session_outside_recent_date_directories() {
         let temp_dir = TempDir::new().unwrap();
         let project_path = temp_dir.path().join("project");
         let session_path = temp_dir
@@ -337,11 +545,11 @@ mod tests {
         .unwrap();
 
         let found = CodexProvider::with_data_dir(temp_dir.path().to_path_buf())
-            .find_latest_session(&project_path)
+            .get_all_sessions(&project_path)
             .await
             .unwrap();
 
-        assert_eq!(found, Some(session_path));
+        assert_eq!(found, vec![session_path]);
     }
 
     #[tokio::test]

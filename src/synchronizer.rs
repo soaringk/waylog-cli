@@ -3,11 +3,11 @@ use crate::exporter::{self, ExportOptions};
 use crate::providers::base::Provider;
 use crate::session::SessionTracker;
 use crate::utils::path;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::debug;
 
-/// Shared synchronization logic for both watcher and batch sync
+/// Synchronizes parsed provider conversations with their local exports.
 pub(crate) struct Synchronizer {
     provider: Arc<dyn Provider>,
     history_dir: PathBuf,
@@ -38,44 +38,53 @@ impl Synchronizer {
         }
     }
 
-    /// Sync a known list of session files
-    pub(crate) async fn sync_paths(
+    pub(crate) async fn sync_selected_paths(
         &self,
         session_paths: Vec<PathBuf>,
         force: bool,
+        session_id: Option<&str>,
     ) -> Vec<(PathBuf, SyncStatus)> {
         let mut results = Vec::new();
-
         for session_path in session_paths {
-            let status = match self.sync_session(&session_path, force).await {
-                Ok(status) => status,
-                Err(e) => SyncStatus::Failed(e.to_string()),
-            };
-            results.push((session_path, status));
+            match self
+                .provider
+                .parse_sessions(&session_path, session_id)
+                .await
+            {
+                Ok(sessions) => {
+                    for session in sessions {
+                        let status = match session {
+                            Ok(session) => match self.sync_parsed_session(session, force).await {
+                                Ok(status) => status,
+                                Err(error) => SyncStatus::Failed(error.to_string()),
+                            },
+                            Err(error) => SyncStatus::Failed(format!("Parse error: {error}")),
+                        };
+                        results.push((session_path.clone(), status));
+                    }
+                }
+                Err(error) => results.push((
+                    session_path,
+                    SyncStatus::Failed(format!("Parse error: {error}")),
+                )),
+            }
         }
-
         results
     }
 
-    /// Sync a specific session file
-    pub(crate) async fn sync_session(
+    async fn sync_parsed_session(
         &self,
-        session_path: &Path,
+        session: crate::providers::base::ChatSession,
         force: bool,
     ) -> Result<SyncStatus> {
-        // 1. Parse session
-        let session = match self.provider.parse_session(session_path).await {
-            Ok(s) => s,
-            Err(e) => return Ok(SyncStatus::Failed(format!("Parse error: {}", e))),
-        };
-
-        if session.messages.is_empty() {
+        let previous = self.tracker.get_session(&session.session_id).await;
+        if session.messages.is_empty() && previous.is_none() {
             return Ok(SyncStatus::Skipped);
         }
 
         // 2. Check state
         let (export_path, mut synced_count, previous_include_tool_calls) =
-            if let Some(state) = self.tracker.get_session(&session.session_id).await {
+            if let Some(state) = previous {
                 (
                     state.export_path,
                     state.synced_message_count,
@@ -101,11 +110,17 @@ impl Synchronizer {
             synced_count = 0;
         }
 
-        // 4. Calculate new messages. Any difference means the recorded Markdown no longer
-        // matches the session, including when parsing now produces fewer messages.
+        // A provider can replace content or metadata without changing the record count.
         let total_messages = exporter::message_count(&session, self.options.include_tool_calls);
-        if synced_count == total_messages {
-            return Ok(SyncStatus::UpToDate);
+        if !force && synced_count == total_messages {
+            match tokio::fs::read_to_string(&export_path).await {
+                Ok(existing) if existing == exporter::generate_session(&session, self.options)? => {
+                    return Ok(SyncStatus::UpToDate);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         let new_messages = total_messages.saturating_sub(synced_count);
 
@@ -244,14 +259,110 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn equal_count_edits_and_a_rewind_to_empty_refresh_both_formats() {
+        for format in [ExportFormat::Markdown, ExportFormat::Json] {
+            let dir = TempDir::new().unwrap();
+            let history = dir.path().join("out");
+            let source = dir.path().join("session.jsonl");
+            let options = ExportOptions {
+                format,
+                ..Default::default()
+            };
+            let timestamp = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+            let mut session = two_message_session("edited", dir.path().to_path_buf(), timestamp);
+            for (content, expected) in [
+                ("original answer", SyncStatus::Synced { new_messages: 2 }),
+                ("replaced answer", SyncStatus::Synced { new_messages: 0 }),
+                ("replaced answer", SyncStatus::UpToDate),
+            ] {
+                session.messages[1].content = content.to_string();
+                let tracker =
+                    Arc::new(SessionTracker::new(&history, "mock", format).await.unwrap());
+                let provider = Arc::new(MockProvider {
+                    session_path: source.clone(),
+                    session: session.clone(),
+                });
+                let status = Synchronizer::new(provider, history.clone(), tracker, options)
+                    .sync_selected_paths(vec![source.clone()], false, None)
+                    .await
+                    .pop()
+                    .unwrap()
+                    .1;
+                assert_eq!(status, expected);
+            }
+            let file = history.join(session_export_filename(&session, "mock", format));
+            let content = tokio::fs::read_to_string(&file).await.unwrap();
+            assert!(content.contains("replaced answer"));
+            assert!(!content.contains("original answer"));
+
+            session.messages.clear();
+            session.started_at = None;
+            session.updated_at = None;
+            let tracker = Arc::new(SessionTracker::new(&history, "mock", format).await.unwrap());
+            let provider = Arc::new(MockProvider {
+                session_path: source.clone(),
+                session,
+            });
+            let status = Synchronizer::new(provider, history.clone(), tracker, options)
+                .sync_selected_paths(vec![source.clone()], false, None)
+                .await
+                .pop()
+                .unwrap()
+                .1;
+            assert_eq!(status, SyncStatus::Synced { new_messages: 0 });
+            let content = tokio::fs::read_to_string(&file).await.unwrap();
+            assert!(!content.contains("replaced answer"));
+            let header = exporter::read_header(&file, format).await.unwrap();
+            assert_eq!(header.message_count, Some(0));
+            assert_eq!(std::fs::read_dir(history).unwrap().count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn equal_count_model_metadata_change_refreshes_json() {
+        let dir = TempDir::new().unwrap();
+        let history = dir.path().join("out");
+        let source = dir.path().join("session.jsonl");
+        let options = ExportOptions {
+            format: ExportFormat::Json,
+            ..Default::default()
+        };
+        let timestamp = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let mut session = two_message_session("metadata", dir.path().to_path_buf(), timestamp);
+        for model in [None, Some("recorded-model")] {
+            session.messages[1].metadata.model = model.map(str::to_string);
+            let tracker = Arc::new(
+                SessionTracker::new(&history, "mock", ExportFormat::Json)
+                    .await
+                    .unwrap(),
+            );
+            let provider = Arc::new(MockProvider {
+                session_path: source.clone(),
+                session: session.clone(),
+            });
+            let status = Synchronizer::new(provider, history.clone(), tracker, options)
+                .sync_selected_paths(vec![source.clone()], false, None)
+                .await
+                .pop()
+                .unwrap()
+                .1;
+            assert!(matches!(status, SyncStatus::Synced { .. }));
+        }
+        let file = history.join(session_export_filename(
+            &session,
+            "mock",
+            ExportFormat::Json,
+        ));
+        let value: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(file).await.unwrap()).unwrap();
+        assert_eq!(value["turns"][1]["parts"][0]["model"], "recorded-model");
+    }
+
     #[async_trait]
     impl Provider for MockProvider {
         fn name(&self) -> &str {
             "mock"
-        }
-
-        async fn find_latest_session(&self, _project_path: &Path) -> Result<Option<PathBuf>> {
-            Ok(Some(self.session_path.clone()))
         }
 
         async fn parse_session(&self, file_path: &Path) -> Result<ChatSession> {
@@ -269,7 +380,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_session_rewrites_stale_markdown_instead_of_reappending_suffix() {
+    async fn synchronization_replaces_stale_markdown() {
         let temp_dir = TempDir::new().unwrap();
         let tracking_root = temp_dir.path().join("tracking-root");
         let target_project = temp_dir.path().join("tracking-root").join("nested-project");
@@ -329,9 +440,11 @@ Second message
         );
 
         let status = synchronizer
-            .sync_session(&session_path, false)
+            .sync_selected_paths(vec![session_path.clone()], false, None)
             .await
-            .unwrap();
+            .pop()
+            .unwrap()
+            .1;
         assert!(matches!(status, SyncStatus::Synced { new_messages: 1 }));
 
         let content = tokio::fs::read_to_string(&markdown_path).await.unwrap();
@@ -351,9 +464,11 @@ Second message
             Synchronizer::new(provider, history_dir, tracker, ExportOptions::default());
 
         let status = synchronizer
-            .sync_session(&session_path, false)
+            .sync_selected_paths(vec![session_path.clone()], false, None)
             .await
-            .unwrap();
+            .pop()
+            .unwrap()
+            .1;
         assert_eq!(status, SyncStatus::UpToDate);
     }
 
@@ -391,9 +506,11 @@ Second message
             tracker,
             ExportOptions::default(),
         )
-        .sync_session(&session_path, false)
+        .sync_selected_paths(vec![session_path.clone()], false, None)
         .await
-        .unwrap();
+        .pop()
+        .unwrap()
+        .1;
 
         let markdown_path = tokio::fs::read_dir(&history_dir)
             .await
@@ -426,9 +543,11 @@ Second message
                 ..Default::default()
             },
         )
-        .sync_session(&session_path, false)
+        .sync_selected_paths(vec![session_path.clone()], false, None)
         .await
-        .unwrap();
+        .pop()
+        .unwrap()
+        .1;
 
         assert!(matches!(status, SyncStatus::Synced { new_messages: 3 }));
         let markdown = tokio::fs::read_to_string(markdown_path).await.unwrap();
