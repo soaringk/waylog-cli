@@ -243,6 +243,10 @@ fn pretty_json(value: &Value) -> String {
 
 /// Converts one provider's discovered or supplied history into chat sessions.
 #[async_trait]
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to boxed futures"
+)]
 pub trait Provider: Send + Sync {
     /// Get the provider name (e.g., "codex", "claude", "gemini")
     fn name(&self) -> &str;
